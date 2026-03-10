@@ -1,0 +1,290 @@
+services:
+  tile-server:
+    # Pinned: ghcr.io/overv/openstreetmap-tile-server:2.3.0
+    image: ghcr.io/overv/openstreetmap-tile-server:2.3.0@sha256:671bf8cf97cf65e21f40d2d53b4ae0062a9afcefffd1c7ce8f9b763f2a5d274f
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -f /data/.import_done ]; then
+          echo "[tiles] First run — importing (this may take 30+ minutes)..."
+          /run.sh import && touch /data/.import_done
+        fi
+        # Use minutely replication for fastest updates (default is hourly)
+        OSMOSIS_CFG="/data/database/.osmosis/configuration.txt"
+        if [ -f "$$OSMOSIS_CFG" ] && grep -q "replication/hour" "$$OSMOSIS_CFG"; then
+          echo "[tiles] Switching to minutely replication..."
+          CURR_MIN_STATE=$$(curl -sfL "https://planet.openstreetmap.org/replication/minute/state.txt") || {
+            echo "[tiles] WARNING: Could not fetch minutely state — keeping hourly replication"
+            exec /run.sh run
+          }
+          HOUR_SEQ=$$(grep sequenceNumber /data/database/.osmosis/state.txt | cut -d= -f2)
+          HOUR_TS=$$(grep timestamp /data/database/.osmosis/state.txt | cut -d= -f2 | sed 's/\\//g')
+          CURR_MIN_SEQ=$$(echo "$$CURR_MIN_STATE" | grep sequenceNumber | cut -d= -f2)
+          CURR_MIN_TS=$$(echo "$$CURR_MIN_STATE" | grep timestamp | cut -d= -f2 | sed 's/\\//g')
+          CURR_EPOCH=$$(date -d "$$CURR_MIN_TS" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$$CURR_MIN_TS" +%s 2>/dev/null)
+          HOUR_EPOCH=$$(date -d "$$HOUR_TS" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%SZ" "$$HOUR_TS" +%s 2>/dev/null)
+          if [ -n "$$CURR_EPOCH" ] && [ -n "$$HOUR_EPOCH" ] && [ "$$CURR_EPOCH" -gt 0 ] && [ "$$HOUR_EPOCH" -gt 0 ]; then
+            DIFF_MIN=$$(( (CURR_EPOCH - HOUR_EPOCH) / 60 ))
+            MIN_SEQ=$$((CURR_MIN_SEQ - DIFF_MIN))
+            sed -i "s|replication/hour/|replication/minute/|" "$$OSMOSIS_CFG"
+            sed -i "s/sequenceNumber=.*/sequenceNumber=$${MIN_SEQ}/" /data/database/.osmosis/state.txt
+            echo "[tiles] Now using minutely replication from seq $${MIN_SEQ}"
+          else
+            echo "[tiles] WARNING: Could not compute sequence numbers — keeping hourly replication"
+          fi
+        fi
+        exec /run.sh run
+    environment:
+      - DOWNLOAD_PBF=${OSM_PBF_URL}
+      - DOWNLOAD_POLY=${OSM_POLY_URL}
+      - UPDATES=enabled
+    volumes:
+      - tiles-db:/var/lib/postgresql/15/main
+      - tiles-cache:/var/cache/renderd
+      - tiles-data:/data
+    ports:
+      - "127.0.0.1:8080:80"
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:80/tile/0/0/0.png"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 2400s
+    restart: unless-stopped
+
+  nominatim:
+    # Pinned: mediagis/nominatim:4.5
+    image: mediagis/nominatim:4.5@sha256:e25b434212b46fadb378fab8054fb3e96bdd69e8d174b0274e5f20e53f15e9f1
+    environment:
+      - PBF_URL=${OSM_PBF_URL}
+      - REPLICATION_URL=https://download.geofabrik.de/asia/armenia-updates/
+      - NOMINATIM_PASSWORD=${NOMINATIM_PASSWORD}
+    volumes:
+      - nominatim-data:/var/lib/postgresql/14/main
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/search?q=test&format=jsonv2"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    restart: unless-stopped
+
+  photon-blue:
+    build: ./services/photon
+    init: true
+    environment:
+      - PHOTON_INSTANCE=blue
+      - NOMINATIM_HOST=nominatim
+      - NOMINATIM_PORT=5432
+      - NOMINATIM_DB=nominatim
+      - NOMINATIM_USER=nominatim
+      - NOMINATIM_PASSWORD=${NOMINATIM_PASSWORD}
+      - PHOTON_LANGUAGES=${PHOTON_LANGUAGES:-hy}
+      - PHOTON_COUNTRY_CODES=${PHOTON_COUNTRY_CODES:-am}
+      - POLL_INTERVAL=${POLL_INTERVAL:-30}
+      - PHOTON_IMPORT_HEAP=${PHOTON_IMPORT_HEAP:-1g}
+      - PHOTON_SERVE_HEAP=${PHOTON_SERVE_HEAP:-512m}
+    volumes:
+      - photon-data-blue:/photon/photon_data
+      - update-triggers:/triggers
+    depends_on:
+      nominatim:
+        condition: service_healthy
+      manager:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:2322/api?q=test"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 600s
+    restart: unless-stopped
+
+  photon-green:
+    build: ./services/photon
+    init: true
+    environment:
+      - PHOTON_INSTANCE=green
+      - NOMINATIM_HOST=nominatim
+      - NOMINATIM_PORT=5432
+      - NOMINATIM_DB=nominatim
+      - NOMINATIM_USER=nominatim
+      - NOMINATIM_PASSWORD=${NOMINATIM_PASSWORD}
+      - PHOTON_LANGUAGES=${PHOTON_LANGUAGES:-hy}
+      - PHOTON_COUNTRY_CODES=${PHOTON_COUNTRY_CODES:-am}
+      - POLL_INTERVAL=${POLL_INTERVAL:-30}
+      - PHOTON_IMPORT_HEAP=${PHOTON_IMPORT_HEAP:-1g}
+      - PHOTON_SERVE_HEAP=${PHOTON_SERVE_HEAP:-512m}
+    volumes:
+      - photon-data-green:/photon/photon_data
+      - update-triggers:/triggers
+    depends_on:
+      nominatim:
+        condition: service_healthy
+      manager:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:2322/api?q=test"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 600s
+    restart: unless-stopped
+
+  osrm:
+    build: ./services/osrm
+    init: true
+    depends_on:
+      manager:
+        condition: service_healthy
+    environment:
+      - OSM_PBF_URL=${OSM_PBF_URL}
+      - DATA_UPDATE_INTERVAL=${DATA_UPDATE_INTERVAL}
+      - OSRM_PROFILE=${OSRM_PROFILE}
+      - OSRM_MAX_MATCHING_SIZE=${OSRM_MAX_MATCHING_SIZE}
+      - OSRM_MAX_TABLE_SIZE=${OSRM_MAX_TABLE_SIZE}
+      - POLL_INTERVAL=${POLL_INTERVAL:-30}
+    volumes:
+      - osrm-data:/var/osrm
+      - osm-downloads:/osm
+      - update-triggers:/triggers
+    ports:
+      - "127.0.0.1:5002:5000"
+    shm_size: '2g'
+    deploy:
+      resources:
+        limits:
+          memory: 6g   # Needs headroom: 2g shm + osrm-extract during updates
+        reservations:
+          memory: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/nearest/v1/driving/44.5,40.2"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    restart: unless-stopped
+
+  manager:
+    build: ./services/manager
+    environment:
+      - TRIGGER_DIR=/triggers
+      - UPDATE_TOKEN=${UPDATE_TOKEN:-}
+      - RATE_LIMIT_SECONDS=${RATE_LIMIT_SECONDS:-60}
+    volumes:
+      - update-triggers:/triggers
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  nginx:
+    # Pinned: nginx:1.27-alpine
+    image: nginx:1.27-alpine
+    depends_on:
+      tile-server:
+        condition: service_started
+      photon-blue:
+        condition: service_started
+      photon-green:
+        condition: service_started
+      osrm:
+        condition: service_started
+      manager:
+        condition: service_started
+    volumes:
+      - ./services/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx-cache:/var/cache/nginx
+      - ./test-app:/usr/share/nginx/html/test-app:ro
+    ports:
+      - "127.0.0.1:80:80"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:80/health >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  tiles-db:
+  tiles-cache:
+  tiles-data:
+  nominatim-data:
+  photon-data-blue:
+  photon-data-green:
+  osrm-data:
+  osm-downloads:
+  nginx-cache:
+  update-triggers:

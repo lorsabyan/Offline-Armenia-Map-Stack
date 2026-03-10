@@ -1,0 +1,934 @@
+zabbix_export:
+  version: '6.4'
+  template_groups:
+    - uuid: 846977d1dfed4968bc5f8bdb363285bc
+      name: 'Templates/Applications'
+
+  templates:
+    - uuid: a3f7c1e0b2d4f5a6c8e9d1b3f4a5c6d7
+      template: 'Offline Armenia Map Stack'
+      name: 'Offline Armenia Map Stack'
+      description: |
+        Monitors the offline Armenia map stack for the 112 emergency call system.
+        Services: tile-server, nominatim, photon (blue-green), osrm, manager, nginx.
+
+        Requires:
+          - {$MAP_BASE_URL} macro set to the stack's base URL (e.g. http://10.0.0.5)
+          - Zabbix server/proxy must be on a network allowed by nginx (RFC 1918)
+
+        Monitored via:
+          - GET /manager/status  (JSON — service states, last update times)
+          - GET /metrics         (Prometheus — counters, gauges)
+          - GET /health          (plain text — nginx liveness)
+      groups:
+        - name: 'Templates/Applications'
+      macros:
+        - macro: '{$MAP_BASE_URL}'
+          value: 'http://localhost'
+          description: 'Base URL of the offline map stack (no trailing slash)'
+        - macro: '{$MAP_STATUS_INTERVAL}'
+          value: '30s'
+          description: 'How often to poll /manager/status'
+        - macro: '{$MAP_METRICS_INTERVAL}'
+          value: '60s'
+          description: 'How often to poll /metrics'
+        - macro: '{$MAP_HEALTH_INTERVAL}'
+          value: '30s'
+          description: 'How often to poll /health'
+        - macro: '{$MAP_STALE_UPDATE_HOURS}'
+          value: '48'
+          description: 'Hours after which a missing update is considered stale'
+        - macro: '{$MAP_HTTP_TIMEOUT}'
+          value: '10s'
+          description: 'HTTP request timeout for all checks'
+        - macro: '{$MAP_UPDATE_TOKEN}'
+          value: ''
+          description: 'Bearer token for POST /update (leave empty if auth disabled)'
+
+      # ================================================================
+      # ITEMS
+      # ================================================================
+      items:
+        # ---- Master items (HTTP Agent) ----
+
+        - uuid: b1a2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+          name: 'Map Stack: Manager Status (raw JSON)'
+          type: HTTP_AGENT
+          key: 'map.manager.status.raw'
+          delay: '{$MAP_STATUS_INTERVAL}'
+          history: 0d
+          trends: 0d
+          value_type: TEXT
+          url: '{$MAP_BASE_URL}/manager/status'
+          timeout: '{$MAP_HTTP_TIMEOUT}'
+          tags:
+            - tag: component
+              value: manager
+            - tag: source
+              value: status-api
+
+        - uuid: b2a3c4d5e6f7a8b9c0d1e2f3a4b5c6d7
+          name: 'Map Stack: Prometheus Metrics (raw)'
+          type: HTTP_AGENT
+          key: 'map.metrics.raw'
+          delay: '{$MAP_METRICS_INTERVAL}'
+          history: 0d
+          trends: 0d
+          value_type: TEXT
+          url: '{$MAP_BASE_URL}/metrics'
+          timeout: '{$MAP_HTTP_TIMEOUT}'
+          tags:
+            - tag: component
+              value: manager
+            - tag: source
+              value: prometheus
+
+        - uuid: b3a4c5d6e7f8a9b0c1d2e3f4a5b6c7d8
+          name: 'Map Stack: Health Check'
+          type: HTTP_AGENT
+          key: 'map.health'
+          delay: '{$MAP_HEALTH_INTERVAL}'
+          history: 7d
+          trends: 90d
+          value_type: TEXT
+          url: '{$MAP_BASE_URL}/health'
+          timeout: '{$MAP_HTTP_TIMEOUT}'
+          tags:
+            - tag: component
+              value: nginx
+
+        # ---- Dependent items: service states from /manager/status ----
+
+        - uuid: c1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6
+          name: 'OSRM: State'
+          type: DEPENDENT
+          key: 'map.osrm.state'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.osrm.state'
+          tags:
+            - tag: component
+              value: osrm
+          triggers:
+            - uuid: t1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6
+              expression: 'last(/Offline Armenia Map Stack/map.osrm.state)="error"'
+              name: 'OSRM service is in error state'
+              priority: HIGH
+              description: 'OSRM routing engine has entered an error state. Routing for 112 dispatchers may be affected.'
+              tags:
+                - tag: scope
+                  value: availability
+                - tag: service
+                  value: osrm
+
+        - uuid: c2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7
+          name: 'OSRM: Last Update'
+          type: DEPENDENT
+          key: 'map.osrm.last_update'
+          delay: '0'
+          history: 90d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.osrm.last_update'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'never'
+          tags:
+            - tag: component
+              value: osrm
+
+        - uuid: c3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8
+          name: 'OSRM: Message'
+          type: DEPENDENT
+          key: 'map.osrm.message'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.osrm.message'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          tags:
+            - tag: component
+              value: osrm
+
+        - uuid: c4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9
+          name: 'OSRM: Trigger Pending'
+          type: DEPENDENT
+          key: 'map.osrm.trigger_pending'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.osrm.trigger_pending'
+          tags:
+            - tag: component
+              value: osrm
+
+        - uuid: d1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6
+          name: 'Photon: Aggregate State'
+          type: DEPENDENT
+          key: 'map.photon.state'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.photon.state'
+          tags:
+            - tag: component
+              value: photon
+          triggers:
+            - uuid: t2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7
+              expression: 'last(/Offline Armenia Map Stack/map.photon.state)="error"'
+              name: 'Photon geocoding has degraded instance(s)'
+              priority: HIGH
+              description: 'At least one Photon instance is in error. Blue-green failover should keep service running, but capacity is reduced.'
+              tags:
+                - tag: scope
+                  value: availability
+                - tag: service
+                  value: photon
+
+        - uuid: d2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7
+          name: 'Photon: Last Update'
+          type: DEPENDENT
+          key: 'map.photon.last_update'
+          delay: '0'
+          history: 90d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.photon.last_update'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'never'
+          tags:
+            - tag: component
+              value: photon
+
+        - uuid: d3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8
+          name: 'Photon: Message'
+          type: DEPENDENT
+          key: 'map.photon.message'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.photon.message'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          tags:
+            - tag: component
+              value: photon
+
+        - uuid: d4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9
+          name: 'Photon Blue: State'
+          type: DEPENDENT
+          key: 'map.photon.blue.state'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.photon.instances.blue.state'
+          tags:
+            - tag: component
+              value: photon
+            - tag: instance
+              value: blue
+
+        - uuid: d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0
+          name: 'Photon Green: State'
+          type: DEPENDENT
+          key: 'map.photon.green.state'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.photon.instances.green.state'
+          tags:
+            - tag: component
+              value: photon
+            - tag: instance
+              value: green
+
+        - uuid: d6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1
+          name: 'Tile Server: State'
+          type: DEPENDENT
+          key: 'map.tile_server.state'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.tile_server.state'
+          tags:
+            - tag: component
+              value: tile-server
+
+        - uuid: d7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2
+          name: 'Nominatim: State'
+          type: DEPENDENT
+          key: 'map.nominatim.state'
+          delay: '0'
+          history: 7d
+          value_type: TEXT
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.nominatim.state'
+          tags:
+            - tag: component
+              value: nominatim
+
+        # ---- Dependent items: Prometheus metrics from /metrics ----
+
+        - uuid: e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6
+          name: 'Manager: Up'
+          type: DEPENDENT
+          key: 'map.manager.up'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_up'
+                - ''
+                - ''
+          tags:
+            - tag: component
+              value: manager
+          triggers:
+            - uuid: t3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8
+              expression: 'last(/Offline Armenia Map Stack/map.manager.up)=0'
+              name: 'Manager process is down'
+              priority: HIGH
+              description: 'The map update manager process reports down. On-demand updates and status API are unavailable.'
+              tags:
+                - tag: scope
+                  value: availability
+                - tag: service
+                  value: manager
+
+        - uuid: e2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7
+          name: 'OSRM: Service Up Gauge'
+          type: DEPENDENT
+          key: 'map.osrm.up'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: FLOAT
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_service_up{service="osrm"}'
+                - ''
+                - ''
+          tags:
+            - tag: component
+              value: osrm
+
+        - uuid: e3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8
+          name: 'Photon: Service Up Gauge'
+          type: DEPENDENT
+          key: 'map.photon.up'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: FLOAT
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_service_up{service="photon"}'
+                - ''
+                - ''
+          tags:
+            - tag: component
+              value: photon
+
+        - uuid: e4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9
+          name: 'Photon Blue: Service Up Gauge'
+          type: DEPENDENT
+          key: 'map.photon.blue.up'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: FLOAT
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_service_up{service="photon-blue"}'
+                - ''
+                - ''
+          tags:
+            - tag: component
+              value: photon
+            - tag: instance
+              value: blue
+
+        - uuid: e5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0
+          name: 'Photon Green: Service Up Gauge'
+          type: DEPENDENT
+          key: 'map.photon.green.up'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: FLOAT
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_service_up{service="photon-green"}'
+                - ''
+                - ''
+          tags:
+            - tag: component
+              value: photon
+            - tag: instance
+              value: green
+
+        - uuid: e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1
+          name: 'Manager: SSE Connections Current'
+          type: DEPENDENT
+          key: 'map.manager.sse_current'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_sse_connections_current'
+                - ''
+                - ''
+          tags:
+            - tag: component
+              value: manager
+
+        - uuid: e7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2
+          name: 'Manager: SSE Connections Total'
+          type: DEPENDENT
+          key: 'map.manager.sse_total'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_sse_connections_total'
+                - ''
+                - ''
+          tags:
+            - tag: component
+              value: manager
+
+        - uuid: e8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3
+          name: 'Manager: HTTP Requests (GET /status)'
+          type: DEPENDENT
+          key: 'map.manager.http.get_status'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_http_requests_total{method="GET",path="/status"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: manager
+
+        - uuid: e9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4
+          name: 'Manager: HTTP Requests (POST /update)'
+          type: DEPENDENT
+          key: 'map.manager.http.post_update'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_http_requests_total{method="POST",path="/update"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: manager
+
+        - uuid: f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6
+          name: 'Manager: Updates Triggered (OSRM)'
+          type: DEPENDENT
+          key: 'map.manager.updates_triggered.osrm'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_updates_triggered_total{service="osrm"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: osrm
+
+        - uuid: f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7
+          name: 'Manager: Updates Triggered (Photon)'
+          type: DEPENDENT
+          key: 'map.manager.updates_triggered.photon'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_updates_triggered_total{service="photon"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: photon
+
+        - uuid: f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8
+          name: 'Manager: Update Errors (OSRM)'
+          type: DEPENDENT
+          key: 'map.manager.update_errors.osrm'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_update_errors_total{service="osrm"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: osrm
+
+        - uuid: f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9
+          name: 'Manager: Update Errors (Photon)'
+          type: DEPENDENT
+          key: 'map.manager.update_errors.photon'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_update_errors_total{service="photon"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: photon
+
+        - uuid: f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0
+          name: 'Manager: Rate Limit Rejections (OSRM)'
+          type: DEPENDENT
+          key: 'map.manager.rate_limit.osrm'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_rate_limit_rejections_total{service="osrm"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: osrm
+
+        - uuid: f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1
+          name: 'Manager: Rate Limit Rejections (Photon)'
+          type: DEPENDENT
+          key: 'map.manager.rate_limit.photon'
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          master_item:
+            key: 'map.metrics.raw'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'manager_rate_limit_rejections_total{service="photon"}'
+                - ''
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          tags:
+            - tag: component
+              value: photon
+
+        # ---- Dependent items: last update as Unix epoch (for staleness) ----
+
+        - uuid: g0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5
+          name: 'OSRM: Last Update (epoch)'
+          type: DEPENDENT
+          key: 'map.osrm.last_update_epoch'
+          delay: '0'
+          history: 90d
+          trends: 365d
+          value_type: UNSIGNED
+          units: unixtime
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.osrm.last_update'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  if (!value || value === 'never' || value === '') return 0;
+                  var d = new Date(value);
+                  return isNaN(d.getTime()) ? 0 : Math.floor(d.getTime() / 1000);
+          description: 'Last OSRM update timestamp as Unix epoch. 0 = never updated.'
+          tags:
+            - tag: component
+              value: osrm
+          triggers:
+            - uuid: t4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9
+              expression: |
+                last(/Offline Armenia Map Stack/map.osrm.last_update_epoch)>0
+                and (now()-last(/Offline Armenia Map Stack/map.osrm.last_update_epoch))>{$MAP_STALE_UPDATE_HOURS}*3600
+              name: 'OSRM data is stale (>{$MAP_STALE_UPDATE_HOURS}h since last update)'
+              priority: WARNING
+              description: 'OSRM routing data has not been updated for more than {$MAP_STALE_UPDATE_HOURS} hours. New roads and closures may not be reflected.'
+              tags:
+                - tag: scope
+                  value: data-freshness
+                - tag: service
+                  value: osrm
+
+        - uuid: g0b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+          name: 'Photon: Last Update (epoch)'
+          type: DEPENDENT
+          key: 'map.photon.last_update_epoch'
+          delay: '0'
+          history: 90d
+          trends: 365d
+          value_type: UNSIGNED
+          units: unixtime
+          master_item:
+            key: 'map.manager.status.raw'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.photon.last_update'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  if (!value || value === 'never' || value === '') return 0;
+                  var d = new Date(value);
+                  return isNaN(d.getTime()) ? 0 : Math.floor(d.getTime() / 1000);
+          description: 'Last Photon update timestamp as Unix epoch. 0 = never updated.'
+          tags:
+            - tag: component
+              value: photon
+          triggers:
+            - uuid: t5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0
+              expression: |
+                last(/Offline Armenia Map Stack/map.photon.last_update_epoch)>0
+                and (now()-last(/Offline Armenia Map Stack/map.photon.last_update_epoch))>{$MAP_STALE_UPDATE_HOURS}*3600
+              name: 'Photon data is stale (>{$MAP_STALE_UPDATE_HOURS}h since last update)'
+              priority: WARNING
+              description: 'Photon geocoding data has not been updated for more than {$MAP_STALE_UPDATE_HOURS} hours. Address search results may be outdated.'
+              tags:
+                - tag: scope
+                  value: data-freshness
+                - tag: service
+                  value: photon
+
+      # ================================================================
+      # TRIGGERS (standalone — not attached to specific items)
+      # ================================================================
+      triggers:
+        - uuid: t6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1
+          expression: |
+            last(/Offline Armenia Map Stack/map.photon.blue.state)="error"
+            and last(/Offline Armenia Map Stack/map.photon.green.state)="error"
+          name: 'DISASTER: Both Photon instances are down'
+          priority: DISASTER
+          description: |
+            Both blue and green Photon instances are in error state.
+            Geocoding (address search) is completely unavailable.
+            This directly impacts 112 dispatchers ability to locate callers by address.
+          tags:
+            - tag: scope
+              value: availability
+            - tag: service
+              value: photon
+
+        - uuid: t7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2
+          expression: 'nodata(/Offline Armenia Map Stack/map.health,90s)'
+          name: 'Map stack NGINX is unreachable'
+          priority: DISASTER
+          description: |
+            Cannot reach the NGINX reverse proxy at {$MAP_BASE_URL}/health
+            for 90 seconds (3x the polling interval).
+            The entire map stack is inaccessible from Zabbix.
+          tags:
+            - tag: scope
+              value: availability
+            - tag: service
+              value: nginx
+
+        - uuid: t8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3
+          expression: 'nodata(/Offline Armenia Map Stack/map.manager.status.raw,120s)'
+          name: 'Manager status API is unreachable'
+          priority: HIGH
+          description: |
+            Cannot fetch /manager/status for 2 minutes.
+            Service status monitoring and on-demand updates are unavailable.
+          tags:
+            - tag: scope
+              value: availability
+            - tag: service
+              value: manager
+
+        - uuid: tc2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f
+          expression: 'find(/Offline Armenia Map Stack/map.health,,"like","offline-armenia-map")=0'
+          name: 'Health check returns unexpected content'
+          priority: HIGH
+          description: |
+            The /health endpoint is reachable but does not contain the expected
+            "offline-armenia-map" string. This indicates nginx is misconfigured
+            (e.g., test-app volume mount failed) and may be serving wrong content.
+          tags:
+            - tag: scope
+              value: availability
+            - tag: service
+              value: nginx
+
+        - uuid: t9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4
+          expression: |
+            last(/Offline Armenia Map Stack/map.osrm.state)="updating"
+            and count(/Offline Armenia Map Stack/map.osrm.state,30m,"ne","updating")=0
+          name: 'OSRM update stuck (>30 minutes)'
+          priority: WARNING
+          description: |
+            OSRM has been in "updating" state for over 30 minutes.
+            Normal Armenia-sized updates take 5-15 minutes.
+          tags:
+            - tag: scope
+              value: performance
+            - tag: service
+              value: osrm
+
+        - uuid: tb1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e
+          expression: |
+            last(/Offline Armenia Map Stack/map.photon.blue.state)="updating"
+            and last(/Offline Armenia Map Stack/map.photon.green.state)="updating"
+          name: 'CRITICAL: Both Photon instances updating simultaneously'
+          priority: DISASTER
+          description: |
+            Both blue and green Photon instances are updating at the same time.
+            Geocoding (address search) is completely unavailable during this period.
+            This should never happen — the manager triggers rolling updates sequentially.
+            Investigate whether the manager was restarted mid-update or triggers were created manually.
+          tags:
+            - tag: scope
+              value: availability
+            - tag: service
+              value: photon
+
+        - uuid: td3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a
+          expression: |
+            last(/Offline Armenia Map Stack/map.osrm.state)="error"
+            and count(/Offline Armenia Map Stack/map.osrm.state,15m,"ne","error")=0
+          name: 'DISASTER: OSRM routing unavailable for >15 minutes'
+          priority: DISASTER
+          description: |
+            OSRM has been in error state for over 15 minutes.
+            Emergency vehicle routing is unavailable.
+            This directly impacts 112 dispatcher ability to route responders.
+          tags:
+            - tag: scope
+              value: availability
+            - tag: service
+              value: osrm
+
+        - uuid: ta0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d
+          expression: |
+            change(/Offline Armenia Map Stack/map.manager.update_errors.osrm)>0
+            or change(/Offline Armenia Map Stack/map.manager.update_errors.photon)>0
+          name: 'Map update error occurred'
+          priority: WARNING
+          description: 'An update error counter incremented. Check manager logs for details.'
+          manual_close: ENABLED
+          tags:
+            - tag: scope
+              value: performance
+
+      # ================================================================
+      # DASHBOARDS
+      # ================================================================
+      dashboards:
+        - uuid: da1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d
+          name: 'Map Stack Overview'
+          auto_start: ENABLED
+          pages:
+            - name: 'Service Status'
+              widgets:
+                - type: PLAIN_TEXT
+                  name: 'Service States'
+                  width: '12'
+                  height: '4'
+                  fields:
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.osrm.state'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.photon.state'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.photon.blue.state'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.photon.green.state'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.tile_server.state'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.nominatim.state'
+                    - type: INTEGER
+                      name: 'show_lines'
+                      value: '10'
+                - type: GRAPH_CLASSIC
+                  name: 'Service Up Gauges (24h)'
+                  x: '12'
+                  width: '12'
+                  height: '4'
+                  fields:
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.osrm.up'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.photon.up'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.photon.blue.up'
+                    - type: ITEM
+                      name: 'itemids'
+                      value:
+                        host: 'Offline Armenia Map Stack'
+                        key: 'map.photon.green.up'
