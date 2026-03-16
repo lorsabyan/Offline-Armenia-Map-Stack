@@ -209,8 +209,19 @@ while true; do
     stop_server  # Reap zombie if any
     start_server
     if wait_for_server 30; then
-      write_status "idle" "Server restarted after crash"
-      CRASH_COUNT=0
+      # Wait 60s stability window before resetting crash counter
+      stable=true
+      for _i in $(seq 1 12); do
+        sleep 5
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+          stable=false
+          break
+        fi
+      done
+      if [ "$stable" = true ]; then
+        write_status "idle" "Server restarted after crash"
+        CRASH_COUNT=0
+      fi
     else
       write_status "error" "Server failed to restart"
     fi

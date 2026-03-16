@@ -163,6 +163,7 @@ prepare_osrm() {
   done
   touch "${OSRM_BASE_PATH}.timestamp"
   trap - RETURN
+  rmdir "$tmp_dir" 2>/dev/null || true
   log "OSRM dataset ready"
 }
 
@@ -266,9 +267,16 @@ write_status "idle" "Service started, data loaded"
 start_server
 schedule_updates
 
-# Monitor server; restart in-process on crash with backoff and circuit breaker
+# Monitor server and update scheduler; restart on crash with backoff and circuit breaker
 while true; do
   wait "$SERVER_PID" || true
+
+  # Restart update scheduler if it died (prevents silent stale-data condition)
+  if [ -n "${UPDATE_PID:-}" ] && ! kill -0 "$UPDATE_PID" 2>/dev/null; then
+    log "WARNING: update scheduler died, restarting"
+    schedule_updates
+  fi
+
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     CRASH_COUNT=$((CRASH_COUNT + 1))
     if [ "$CRASH_COUNT" -gt "$MAX_CRASH_RESTARTS" ]; then

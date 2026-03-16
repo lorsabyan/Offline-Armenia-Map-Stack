@@ -92,8 +92,8 @@ if [ "$FOLLOW" = true ]; then
       data:*)
         ts=$(date +"%H:%M:%S")
         payload="${line#data: }"
-        # Single python3 invocation to parse all fields at once
-        read -r osrm_state photon_state osrm_msg photon_msg < <(
+        # Single python3 invocation to parse all fields at once (tab-delimited to handle spaces)
+        IFS=$'\t' read -r osrm_state photon_state osrm_msg photon_msg < <(
           printf '%s\n' "$payload" | python3 -c "
 import sys, json
 try:
@@ -103,9 +103,10 @@ try:
         d.get('photon',{}).get('state','?'),
         d.get('osrm',{}).get('message',''),
         d.get('photon',{}).get('message',''),
+        sep='\t',
     )
 except Exception:
-    print('? ? ? ?')
+    print('?\t?\t\t')
 " 2>/dev/null
         ) || { osrm_state="?"; photon_state="?"; osrm_msg=""; photon_msg=""; }
         echo "[$ts] OSRM: $osrm_state — $osrm_msg | Photon: $photon_state — $photon_msg"
