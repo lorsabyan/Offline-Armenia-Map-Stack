@@ -621,13 +621,13 @@
   </button>
 </div>
 
-<div id="update-panel">
+<div id="update-panel" role="dialog" aria-label="Service Status">
   <div id="update-panel-header">
     <h3>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>
       Service Status
     </h3>
-    <button class="update-panel-close" id="update-panel-close">&times;</button>
+    <button class="update-panel-close" id="update-panel-close" aria-label="Close">&times;</button>
   </div>
   <div id="update-services"></div>
   <div id="update-monitor"></div>
@@ -860,7 +860,7 @@ map.on('load', () => {
     setActiveLayer('osm');
   });
   checkServices();
-  setInterval(checkServices, 30000);
+  setInterval(() => { if (!document.hidden) checkServices(); }, 30000);
 });
 
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
@@ -2374,20 +2374,22 @@ async function probeTileServer() {
   }
 }
 
-async function probeNominatim() {
+async function probeGeocoding() {
   try {
     const t0 = performance.now();
     const res = await fetch(`${BASE}/photon/api?q=test&limit=1`);
     const latency = Math.round(performance.now() - t0);
-    _healthCache.nominatim = { ok: res.ok, latency, checkedAt: Date.now() };
+    _healthCache.geocoding = { ok: res.ok, latency, checkedAt: Date.now() };
   } catch {
-    _healthCache.nominatim = { ok: false, latency: 0, checkedAt: Date.now() };
+    _healthCache.geocoding = { ok: false, latency: 0, checkedAt: Date.now() };
   }
 }
 
+let _lastStatusData = null;
 function runHealthProbes() {
-  probeTileServer();
-  probeNominatim();
+  Promise.all([probeTileServer(), probeGeocoding()]).then(() => {
+    if (_lastStatusData) renderStatusPanel(_lastStatusData);
+  });
 }
 
 updateBtn.addEventListener('click', (e) => {
@@ -2403,16 +2405,20 @@ updateBtn.addEventListener('click', (e) => {
   }
 });
 
-updatePanelClose.addEventListener('click', () => {
+function closeStatusPanel() {
   updatePanel.classList.remove('visible');
   stopProgressStream();
-});
+  _lastStatusData = null;
+  _healthCache.tile_server = undefined;
+  _healthCache.geocoding = undefined;
+}
+
+updatePanelClose.addEventListener('click', closeStatusPanel);
 
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#update-btn') && !e.target.closest('#update-panel')) {
     if (updatePanel.classList.contains('visible')) {
-      updatePanel.classList.remove('visible');
-      stopProgressStream();
+      closeStatusPanel();
     }
   }
 });
@@ -2422,6 +2428,7 @@ async function fetchUpdateStatus() {
     const res = await fetch(`${BASE}/manager/status`);
     if (!res.ok) throw new Error();
     const data = await res.json();
+    _lastStatusData = data;
     renderStatusPanel(data);
   } catch {
     updateServicesEl.innerHTML =
@@ -2445,7 +2452,8 @@ function renderStatusPanel(data) {
     const isError = state === 'error';
     const isUpdating = state === 'updating' || s.trigger_pending;
     const badgeLabel = s.trigger_pending ? 'queued' : state;
-    const badgeClass = s.trigger_pending ? 'queued' : state;
+    const _rawBadge = s.trigger_pending ? 'queued' : state;
+    const badgeClass = ['idle','updating','queued','error','auto'].includes(_rawBadge) ? _rawBadge : 'idle';
 
     // Timestamps
     const relTime = formatRelativeTime(s.last_update);
@@ -2483,18 +2491,23 @@ function renderStatusPanel(data) {
       } else {
         timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value">Unknown</span></div>`;
       }
-      const probe = _healthCache.nominatim;
+      const probe = _healthCache.geocoding;
       if (probe) {
-        timeHtml += `<div class="update-svc-time"><span class="time-label">Search probe:</span> <span class="${probe.ok ? 'time-value' : 'time-error'}">${probe.ok ? 'Healthy' : 'Unreachable'} (${probe.latency}ms)</span></div>`;
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Geocoding probe:</span> <span class="${probe.ok ? 'time-value' : 'time-error'}">${probe.ok ? 'Healthy' : 'Unreachable'} (${probe.latency}ms)</span></div>`;
       }
     } else {
       // OSRM, Photon
-      if (isError && relTime) {
-        timeHtml += `<div class="update-svc-time"><span class="time-label">Last failure:</span> <span class="time-error" title="${esc(absTime)}">${esc(relTime)}</span></div>`;
-      } else if (relTime) {
+      if (relTime) {
         timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value" title="${esc(absTime)}">${esc(relTime)}</span></div>`;
       } else {
         timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value">Never</span></div>`;
+      }
+      if (isError && s.updated_at) {
+        const errorSince = formatRelativeTime(s.updated_at);
+        const errorAbs = new Date(s.updated_at).toLocaleString();
+        if (errorSince) {
+          timeHtml += `<div class="update-svc-time"><span class="time-label">Error since:</span> <span class="time-error" title="${esc(errorAbs)}">${esc(errorSince)}</span></div>`;
+        }
       }
     }
 
@@ -2545,12 +2558,15 @@ function startProgressStream() {
   try {
     updateEventSource = new EventSource(`${BASE}/manager/progress`);
     updateEventSource.onmessage = (e) => {
-      try { renderStatusPanel(JSON.parse(e.data)); } catch {}
+      try { _lastStatusData = JSON.parse(e.data); renderStatusPanel(_lastStatusData); } catch {}
       // Re-run health probes every 30s while panel is open
       if (Date.now() - _lastProbeTime > 30000) {
         _lastProbeTime = Date.now();
         runHealthProbes();
       }
+    };
+    updateEventSource.onerror = () => {
+      // EventSource auto-reconnects; no action needed but could add UI indicator
     };
   } catch {}
 }
