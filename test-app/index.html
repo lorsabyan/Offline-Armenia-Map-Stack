@@ -1837,14 +1837,33 @@ function snapPopupHtml(snap) {
   return parts.join('');
 }
 
+// Snap line SVG overlay
+let _snapSvg = null;
+let _snapLineCoords = null;
+
+function _updateSnapSvg() {
+  if (!_snapSvg || !_snapLineCoords) return;
+  const canvas = map.getCanvas();
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  _snapSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  _snapSvg.style.width = w + 'px';
+  _snapSvg.style.height = h + 'px';
+  const line = _snapSvg.querySelector('polyline');
+  const pts = _snapLineCoords.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
+  line.setAttribute('points', pts);
+}
+
 // Clean up snap visualization
 function clearSnapVisuals() {
   if (snapMarker) { snapMarker.remove(); snapMarker = null; }
   if (clickMarker) { clickMarker.remove(); clickMarker = null; }
-  if (map.getSource('snap-line')) {
-    map.removeLayer('snap-line-layer');
-    map.removeSource('snap-line');
+  if (_snapSvg) {
+    _snapSvg.remove();
+    _snapSvg = null;
+    map.off('move', _updateSnapSvg);
+    map.off('resize', _updateSnapSvg);
   }
+  _snapLineCoords = null;
 }
 
 map.on('contextmenu', async (e) => {
@@ -1883,27 +1902,21 @@ map.on('contextmenu', async (e) => {
           .setLngLat([clickLng, clickLat])
           .addTo(map);
 
-        map.addSource('snap-line', {
-          type: 'geojson',
-          data: {
-            type: 'Feature',
-            geometry: {
-              type: 'LineString',
-              coordinates: [[clickLng, clickLat], [snap.snapLng, snap.snapLat]]
-            }
-          }
-        });
-        map.addLayer({
-          id: 'snap-line-layer',
-          type: 'line',
-          source: 'snap-line',
-          paint: {
-            'line-color': '#6366f1',
-            'line-width': 2,
-            'line-dasharray': [3, 3],
-            'line-opacity': 0.6
-          }
-        });
+        // SVG snap line overlay
+        _snapLineCoords = [[clickLng, clickLat], [snap.snapLng, snap.snapLat]];
+        _snapSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        _snapSvg.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:1;';
+        const snapLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+        snapLine.setAttribute('fill', 'none');
+        snapLine.setAttribute('stroke', '#6366f1');
+        snapLine.setAttribute('stroke-width', '2');
+        snapLine.setAttribute('stroke-dasharray', '6,6');
+        snapLine.setAttribute('stroke-opacity', '0.6');
+        _snapSvg.appendChild(snapLine);
+        map.getCanvasContainer().appendChild(_snapSvg);
+        _updateSnapSvg();
+        map.on('move', _updateSnapSvg);
+        map.on('resize', _updateSnapSvg);
       }
 
     } catch (err) {
@@ -2014,15 +2027,7 @@ function clearRouteDisplay() {
   routeDistEl.textContent = '\u2014';
   routeDurEl.textContent = '\u2014';
   routeStepsEl.innerHTML = '';
-  if (map.getSource('route')) {
-    map.removeLayer('route-line');
-    map.removeLayer('route-outline');
-    map.removeSource('route');
-  }
-  if (map.getSource('route-connectors')) {
-    map.removeLayer('route-connectors-line');
-    map.removeSource('route-connectors');
-  }
+  clearRouteSvg();
 }
 
 map.on('click', async (e) => {
@@ -2085,47 +2090,114 @@ async function fetchRoute() {
   }
 }
 
-function drawRoute(geometry) {
-  if (map.getSource('route')) {
-    map.removeLayer('route-line');
-    map.removeLayer('route-outline');
-    map.removeSource('route');
-  }
-  if (map.getSource('route-connectors')) {
-    map.removeLayer('route-connectors-line');
-    map.removeSource('route-connectors');
-  }
-  map.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry } });
-  map.addLayer({
-    id: 'route-outline', type: 'line', source: 'route',
-    paint: { 'line-color': '#1e40af', 'line-width': 8, 'line-opacity': 0.3 }
-  });
-  map.addLayer({
-    id: 'route-line', type: 'line', source: 'route',
-    paint: { 'line-color': '#2563eb', 'line-width': 5, 'line-opacity': 0.9 }
-  });
+// Route drawing via SVG overlay (reliable over raster tiles on all platforms)
+let _routeSvg = null;
+let _routeCoords = null;
+let _connectorCoords = null;
 
-  // Dashed connector lines from markers to route start/end (snapped road points)
-  const c = geometry.coordinates;
-  const connectors = [];
-  if (routeStart && c.length) {
-    connectors.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: [[routeStart.lng, routeStart.lat], c[0]] } });
-  }
-  if (routeEnd && c.length) {
-    connectors.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: [[routeEnd.lng, routeEnd.lat], c[c.length - 1]] } });
-  }
-  if (connectors.length) {
-    map.addSource('route-connectors', { type: 'geojson', data: { type: 'FeatureCollection', features: connectors } });
-    map.addLayer({
-      id: 'route-connectors-line', type: 'line', source: 'route-connectors',
-      paint: { 'line-color': '#6b7280', 'line-width': 2, 'line-dasharray': [4, 4], 'line-opacity': 0.7 }
+function _updateRouteSvg() {
+  if (!_routeSvg || !_routeCoords) return;
+  const canvas = map.getCanvas();
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  _routeSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  _routeSvg.style.width = w + 'px';
+  _routeSvg.style.height = h + 'px';
+
+  // Main route path
+  const routePath = _routeSvg.querySelector('.route-path');
+  const outlinePath = _routeSvg.querySelector('.route-outline');
+  const points = _routeCoords.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
+  routePath.setAttribute('points', points);
+  outlinePath.setAttribute('points', points);
+
+  // Connector paths
+  const connectorEls = _routeSvg.querySelectorAll('.route-connector');
+  if (_connectorCoords) {
+    _connectorCoords.forEach((seg, i) => {
+      if (connectorEls[i]) {
+        const cp = seg.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
+        connectorEls[i].setAttribute('points', cp);
+      }
     });
   }
+}
+
+function drawRoute(geometry) {
+  clearRouteSvg();
+
+  const c = geometry.coordinates;
+  _routeCoords = c;
+
+  // Build connector segments
+  _connectorCoords = [];
+  if (routeStart && c.length) {
+    _connectorCoords.push([[routeStart.lng, routeStart.lat], c[0]]);
+  }
+  if (routeEnd && c.length) {
+    _connectorCoords.push([[routeEnd.lng, routeEnd.lat], c[c.length - 1]]);
+  }
+
+  // Create SVG overlay
+  const container = map.getCanvasContainer();
+  _routeSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  _routeSvg.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:1;';
+
+  // Outline (wider, semi-transparent)
+  const outline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  outline.setAttribute('class', 'route-outline');
+  outline.setAttribute('fill', 'none');
+  outline.setAttribute('stroke', '#1e40af');
+  outline.setAttribute('stroke-width', '8');
+  outline.setAttribute('stroke-opacity', '0.3');
+  outline.setAttribute('stroke-linejoin', 'round');
+  outline.setAttribute('stroke-linecap', 'round');
+  _routeSvg.appendChild(outline);
+
+  // Main route line
+  const routeLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  routeLine.setAttribute('class', 'route-path');
+  routeLine.setAttribute('fill', 'none');
+  routeLine.setAttribute('stroke', '#2563eb');
+  routeLine.setAttribute('stroke-width', '5');
+  routeLine.setAttribute('stroke-opacity', '0.9');
+  routeLine.setAttribute('stroke-linejoin', 'round');
+  routeLine.setAttribute('stroke-linecap', 'round');
+  _routeSvg.appendChild(routeLine);
+
+  // Connector dashed lines
+  for (let i = 0; i < _connectorCoords.length; i++) {
+    const conn = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    conn.setAttribute('class', 'route-connector');
+    conn.setAttribute('fill', 'none');
+    conn.setAttribute('stroke', '#6b7280');
+    conn.setAttribute('stroke-width', '2');
+    conn.setAttribute('stroke-dasharray', '8,8');
+    conn.setAttribute('stroke-opacity', '0.7');
+    _routeSvg.appendChild(conn);
+  }
+
+  container.appendChild(_routeSvg);
+  _updateRouteSvg();
+
+  // Update SVG on every map movement
+  map.on('move', _updateRouteSvg);
+  map.on('resize', _updateRouteSvg);
 
   const bounds = c.reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(c[0], c[0]));
   if (routeStart) bounds.extend([routeStart.lng, routeStart.lat]);
   if (routeEnd) bounds.extend([routeEnd.lng, routeEnd.lat]);
   map.fitBounds(bounds, { padding: 80, duration: 800 });
+}
+
+function clearRouteSvg() {
+  if (_routeSvg) {
+    _routeSvg.remove();
+    _routeSvg = null;
+    map.off('move', _updateRouteSvg);
+    map.off('resize', _updateRouteSvg);
+  }
+  _routeCoords = null;
+  _connectorCoords = null;
 }
 
 function displayRouteInfo(route) {
