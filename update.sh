@@ -65,16 +65,20 @@ case "$SERVICE" in
 esac
 
 echo "Triggering update for: $SERVICE"
-CURL_ARGS=(-sf -X POST "${MANAGER_URL}/update" -H "Content-Type: application/json")
+CURL_ARGS=(-sS -X POST "${MANAGER_URL}/update" -H "Content-Type: application/json" -w '\n%{http_code}')
 if [ -n "$UPDATE_TOKEN" ]; then
   CURL_ARGS+=(-H "Authorization: Bearer ${UPDATE_TOKEN}")
 fi
 CURL_ARGS+=(-d "{\"services\": ${svc_json}, \"source\": \"cli\"}")
-response=$(curl "${CURL_ARGS[@]}") || {
+raw_response=$(curl "${CURL_ARGS[@]}" 2>&1) || {
   echo "Error: Could not reach manager at ${MANAGER_URL}"
+  printf '%s\n' "$raw_response"
   echo "Make sure the Docker stack is running: docker compose up -d"
   exit 1
 }
+# Split response body from HTTP status code (appended by -w)
+http_code=$(printf '%s' "$raw_response" | tail -1)
+response=$(printf '%s' "$raw_response" | sed '$d')
 
 printf '%s\n' "$response" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$response"
 

@@ -56,6 +56,9 @@ if not re.match(r'^[a-zA-Z0-9._-]+$', NOMINATIM_HOST):
     print(f"[manager] FATAL: NOMINATIM_HOST contains invalid characters: {NOMINATIM_HOST!r}", flush=True)
     sys.exit(1)
 NOMINATIM_PORT = int(os.environ.get("NOMINATIM_STATUS_PORT", "8080"))
+if not (1 <= NOMINATIM_PORT <= 65535):
+    print(f"[manager] FATAL: NOMINATIM_STATUS_PORT={NOMINATIM_PORT} is not in range 1-65535", flush=True)
+    sys.exit(1)
 NOMINATIM_POLL_INTERVAL = int(os.environ.get("NOMINATIM_POLL_INTERVAL", "300"))  # 5 min
 # Minimum seconds between auto-triggered Photon updates (default 1 hour)
 # This prevents rapid re-triggers when Nominatim applies many small diffs.

@@ -46,7 +46,7 @@ write_status() {
     --arg lu "$last_update" --arg ts "$ts" --arg inst "$PHOTON_INSTANCE" \
     '{state:$s,message:$m,progress:$p,last_update:$lu,updated_at:$ts,instance:$inst}' > "$tmp_file" 2>/dev/null; then
     printf '{"state":"%s","message":"status write degraded","updated_at":"%s","instance":"%s"}' \
-      "$state" "$ts" "$PHOTON_INSTANCE" > "$tmp_file"
+      "${state//\"/\\\"}" "$ts" "${PHOTON_INSTANCE//\"/\\\"}" > "$tmp_file"
   fi
   mv -f "$tmp_file" "$status_file"
 }

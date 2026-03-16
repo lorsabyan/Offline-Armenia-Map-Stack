@@ -201,8 +201,8 @@ schedule_updates() {
 
     while true; do
       # Poll every POLL_INTERVAL seconds; break early on manual trigger
-      local elapsed=0
-      local triggered=false
+      elapsed=0
+      triggered=false
       while [ "$elapsed" -lt "$DATA_UPDATE_INTERVAL" ]; do
         sleep "$POLL_INTERVAL"
         elapsed=$((elapsed + POLL_INTERVAL))
@@ -218,7 +218,7 @@ schedule_updates() {
       fi
 
       write_status "updating" "Downloading latest extract..." "downloading"
-      local dl_result=0
+      dl_result=0
       download_pbf || dl_result=$?
 
       if [ "$dl_result" -eq 0 ]; then
