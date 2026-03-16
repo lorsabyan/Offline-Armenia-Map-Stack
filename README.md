@@ -1,6 +1,6 @@
 # Offline Armenia Map Stack
 
-A fully self-hosted, offline-capable mapping platform for Armenia built on Docker. Provides raster tiles, geocoding, reverse geocoding, and routing with automatic data updates from OpenStreetMap. Designed for mission-critical applications including the **112 emergency call system** with zero-downtime update guarantees.
+A fully self-hosted, offline-capable mapping platform for Armenia built on Docker. Provides raster tiles, geocoding, reverse geocoding, and routing — all **fully autonomous** with automatic data updates from OpenStreetMap. No manual intervention required: when OSM data changes, every service updates itself with zero downtime. Designed for mission-critical applications including the **112 emergency call system**.
 
 ---
 
@@ -14,6 +14,7 @@ A fully self-hosted, offline-capable mapping platform for Armenia built on Docke
 - [Directory Layout](#directory-layout)
 - [API Reference](#api-reference)
 - [Test App](#test-app)
+- [Autonomous Update Chain](#autonomous-update-chain)
 - [On-Demand Updates](#on-demand-updates)
 - [Update Flow & Data Freshness](#update-flow--data-freshness)
 - [Zero-Downtime Design](#zero-downtime-design)
@@ -40,12 +41,13 @@ graph TB
         NGINX -->|/photon/| PB["Photon Blue"]
         NGINX -->|/photon/| PG["Photon Green"]
         NGINX -->|/osrm/| OSRM["OSRM Backend<br/>:5000"]
-        NGINX -->|/manager/| Manager["Manager API<br/>:8000"]
+        NGINX -->|/manager/| Manager["Manager<br/>:8000"]
 
         PB & PG -->|import from| Nominatim["Nominatim<br/>:8080"]
         Tiles --> DB[("PostgreSQL<br/>+ Volumes")]
         Nominatim --> DB
         Manager -->|trigger files| Triggers[("/triggers/<br/>shared volume")]
+        Manager -.->|"polls /status<br/>every 5 min"| Nominatim
         OSRM -.->|polls| Triggers
         PB -.->|polls| Triggers
         PG -.->|polls| Triggers
@@ -62,6 +64,7 @@ graph TB
     style Geofabrik fill:#fce7f3,stroke:#db2777,color:#831843
     style DB fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
     style Triggers fill:#fff7ed,stroke:#ea580c,color:#7c2d12
+    style Manager fill:#fef3c7,stroke:#d97706,color:#78350f
 ```
 
 **7 containers**, **10 named volumes**, fully orchestrated via Docker Compose.
@@ -74,10 +77,10 @@ graph TB
 |---------|--------------|---------|------|-----------------|
 | **tile-server** | `ghcr.io/overv/openstreetmap-tile-server` | Raster tile rendering (z/x/y PNG) | 8080 | Automatic minutely diffs from OSM |
 | **nominatim** | `mediagis/nominatim:4.5` | Geocoding database (PostgreSQL + address index) | — | Automatic Geofabrik replication |
-| **photon-blue** | `./services/photon` | Geocoding search API (instance 1 of 2) | — | On-demand via manager trigger |
-| **photon-green** | `./services/photon` | Geocoding search API (instance 2 of 2) | — | On-demand via manager trigger |
-| **osrm** | `./services/osrm` | Routing engine (driving directions) | 5002 | On-demand via manager trigger |
-| **manager** | `./services/manager` | Update orchestration API (trigger files + SSE) | — | N/A (orchestrator) |
+| **photon-blue** | `./services/photon` | Geocoding search API (instance 1 of 2) | — | Automatic (data-change monitor) + on-demand |
+| **photon-green** | `./services/photon` | Geocoding search API (instance 2 of 2) | — | Automatic (data-change monitor) + on-demand |
+| **osrm** | `./services/osrm` | Routing engine (driving directions) | 5002 | Automatic (data-change monitor) + on-demand |
+| **manager** | `./services/manager` | Update orchestration + data-change monitor | — | N/A (orchestrator) |
 | **nginx** | `nginx:1.27-alpine` | Reverse proxy, tile cache, CORS, load balancer | **80** | N/A (proxy) |
 
 ---
@@ -163,6 +166,10 @@ Copy `.env.example` to `.env` and adjust for your environment. The `.env` file i
 | `UPDATE_TOKEN` | *(empty)* | Bearer token for manager API authentication (recommended for production) |
 | `RATE_LIMIT_SECONDS` | `60` | Minimum seconds between update requests per service |
 | `POLL_INTERVAL` | `30` | Trigger polling interval for OSRM and Photon (seconds) |
+| `NOMINATIM_AUTO_UPDATE` | `enabled` | Auto-trigger Photon + OSRM when Nominatim data changes |
+| `NOMINATIM_POLL_INTERVAL` | `300` | How often (seconds) to poll Nominatim `/status` for data changes |
+| `PHOTON_AUTO_UPDATE_COOLDOWN` | `3600` | Minimum seconds between auto-triggered Photon updates |
+| `OSRM_AUTO_UPDATE_COOLDOWN` | `3600` | Minimum seconds between auto-triggered OSRM updates |
 
 ---
 
@@ -184,7 +191,7 @@ offline-armenia-map/
 └── services/
     ├── manager/
     │   ├── Dockerfile                # Python 3.13 Alpine (digest-pinned)
-    │   └── manager.py                # Update orchestration HTTP API + Prometheus metrics
+    │   └── manager.py                # Update orchestration + data-change monitor + Prometheus metrics
     ├── photon/
     │   ├── Dockerfile                # Java 21 JRE + Photon 1.0.1 (digest-pinned)
     │   └── entrypoint.sh             # Import, serve, trigger polling
@@ -302,6 +309,8 @@ Exposes metrics in Prometheus text exposition format (`text/plain; version=0.0.4
 | `manager_sse_connections_total` | counter | Total SSE connections opened |
 | `manager_update_errors_total` | counter | Update errors by service |
 | `manager_service_up` | gauge | Service state: 1=idle/auto, 0.5=updating, 0=error |
+| `manager_data_change_monitor_enabled` | gauge | Nominatim data-change monitor is enabled (1) |
+| `manager_auto_trigger_timestamp_seconds` | gauge | Last auto-trigger Unix timestamp by service (photon, osrm) |
 
 Example Prometheus scrape config:
 ```yaml
@@ -418,6 +427,76 @@ All icons are sourced from [OpenStreetMap Carto](https://github.com/gravitystorm
 
 ---
 
+## Autonomous Update Chain
+
+Every service in the stack updates automatically — no cron jobs, no manual triggers, no operator intervention required.
+
+```mermaid
+graph LR
+    subgraph External["Data Sources"]
+        OSM(["OpenStreetMap<br/>edits"])
+        GF(["Geofabrik<br/>extracts + diffs"])
+    end
+
+    subgraph Auto["Automatic Updates"]
+        direction TB
+        TS["Tile Server<br/>minutely diffs<br/>~1-3 min lag"]
+        NOM["Nominatim<br/>continuous replication<br/>~15 min lag"]
+    end
+
+    subgraph Monitor["Data-Change Monitor"]
+        MGR["Manager polls<br/>Nominatim /status<br/>every 5 min"]
+    end
+
+    subgraph Triggered["Auto-Triggered on Data Change"]
+        direction TB
+        PHO["Photon<br/>rolling blue-green reimport<br/>~20 min lag"]
+        OSRM2["OSRM<br/>PBF re-download + rebuild<br/>~25 min lag"]
+    end
+
+    OSM -->|minutely| TS
+    GF -->|diffs| NOM
+    NOM -->|data_updated changes| MGR
+    MGR -->|trigger| PHO
+    MGR -->|trigger| OSRM2
+    GF -->|PBF| OSRM2
+
+    style External fill:#fce7f3,stroke:#db2777
+    style Auto fill:#dbeafe,stroke:#2563eb
+    style Monitor fill:#fef3c7,stroke:#d97706
+    style Triggered fill:#dcfce7,stroke:#16a34a
+```
+
+### How It Works
+
+1. **Tile Server** and **Nominatim** have built-in replication — they pull updates directly from upstream sources
+2. The **Manager** runs a background **data-change monitor** that polls Nominatim's `/status` endpoint every 5 minutes
+3. When Nominatim's `data_updated` timestamp changes (new replication diffs applied), the manager automatically:
+   - Triggers a **Photon rolling update** (blue-green, zero downtime)
+   - Triggers an **OSRM update** (PBF re-download with `If-Modified-Since`, only rebuilds if data changed)
+4. Each service has an independent **cooldown** (default 1 hour) to prevent rapid re-triggers
+
+### Autonomous Update Summary
+
+| Service | Source | Trigger | Latency | Downtime |
+|---------|--------|---------|---------|----------|
+| **Tile Server** | OSM minutely diffs | Built-in replication | ~1-3 min | 0 ms |
+| **Nominatim** | Geofabrik replication diffs | Built-in replication | ~15 min | 0 ms |
+| **Photon** | Nominatim database | Data-change monitor → rolling update | ~20 min | 0 ms |
+| **OSRM** | Geofabrik PBF extract | Data-change monitor → re-download | ~25 min | 0 ms |
+
+### Fallbacks
+
+The autonomous system has multiple safety layers:
+
+- **OSRM backup polling**: Independent 24-hour scheduled cycle (`DATA_UPDATE_INTERVAL`) as belt-and-suspenders
+- **Manual triggers**: `POST /manager/update` and `./update.sh` always available for immediate updates
+- **Cooldown protection**: Prevents rapid re-triggers when Nominatim applies many small diffs
+- **Blue-green safety**: Never takes both Photon instances down simultaneously (30-minute timeout guard)
+- **OSRM `If-Modified-Since`**: Avoids unnecessary rebuilds when PBF hasn't changed yet
+
+---
+
 ## On-Demand Updates
 
 ### Web UI
@@ -458,17 +537,25 @@ curl -N http://localhost/manager/progress
 
 ### How Triggers Work
 
+Triggers can be created by the **data-change monitor** (automatic) or by **manual API requests**:
+
 ```mermaid
 sequenceDiagram
-    participant Client
+    participant Nominatim
+    participant Monitor as Data-Change Monitor
     participant Manager
     participant Triggers as /triggers/ volume
     participant Service as OSRM / Photon
 
-    Client->>Manager: POST /manager/update
-    Manager->>Manager: Rate limit check
-    Manager->>Triggers: Write osrm.trigger
-    Manager-->>Client: 200 OK (accepted)
+    Note over Monitor: Automatic path (every 5 min)
+    Monitor->>Nominatim: GET /status?format=json
+    Nominatim-->>Monitor: data_updated timestamp
+    Monitor->>Monitor: Compare with last known timestamp
+    Monitor->>Triggers: Write photon-blue.trigger + osrm.trigger
+
+    Note over Manager: Manual path (on-demand)
+    Manager->>Manager: POST /update → rate limit check
+    Manager->>Triggers: Write .trigger file
 
     loop Every 30 seconds
         Service->>Triggers: Poll for .trigger file
@@ -478,10 +565,6 @@ sequenceDiagram
     Service->>Triggers: Write .status = "updating"
     Service->>Service: Download + rebuild
     Service->>Triggers: Write .status = "idle"
-
-    Client->>Manager: GET /manager/progress (SSE)
-    Manager->>Triggers: Read .status files
-    Manager-->>Client: SSE: status events
 ```
 
 No Docker socket access required. Each service self-manages its own updates.
@@ -492,10 +575,10 @@ No Docker socket access required. Each service self-manages its own updates.
 
 | Service | Data Source | Update Frequency | Lag Behind OSM |
 |---------|-----------|-----------------|----------------|
-| **Tile Server** | OSM minutely diffs (planet.openstreetmap.org) | Automatic, every minute | **~1-2 minutes** |
-| **Nominatim** | Geofabrik Armenia updates | Automatic, continuous replication | **~1-2 minutes** |
-| **OSRM** | Geofabrik Armenia PBF extract | On-demand (daily extract availability) | **Up to ~24 hours** |
-| **Photon** | Reimport from local Nominatim | On-demand (instant from Nominatim) | Same as Nominatim |
+| **Tile Server** | OSM minutely diffs (planet.openstreetmap.org) | Automatic, every minute | **~1-3 minutes** |
+| **Nominatim** | Geofabrik Armenia updates | Automatic, continuous replication | **~15 minutes** |
+| **Photon** | Reimport from local Nominatim | Automatic (data-change monitor) + on-demand | **~20 minutes** |
+| **OSRM** | Geofabrik Armenia PBF extract | Automatic (data-change monitor) + on-demand | **~25 minutes** |
 
 ### Tile Server Replication
 
@@ -539,7 +622,11 @@ For a single-feature edit (e.g., a building in Yerevan), this typically expires 
 
 ```mermaid
 graph TD
-    Poll["Poll /triggers/ every 30s<br/>or DATA_UPDATE_INTERVAL"] --> Check{"Trigger file<br/>or schedule?"}
+    Auto["Data-change monitor<br/>detects Nominatim update"] -->|auto-trigger| Trigger["Write osrm.trigger"]
+    Manual["POST /manager/update"] -->|manual trigger| Trigger
+    Schedule["DATA_UPDATE_INTERVAL<br/>(24h fallback)"] -->|scheduled| Trigger
+
+    Poll["Poll /triggers/ every 30s"] --> Check{"Trigger file?"}
     Check -->|No| Poll
     Check -->|Yes| Download["Download PBF<br/>If-Modified-Since header"]
     Download --> Changed{"Newer extract<br/>available?"}
@@ -551,32 +638,39 @@ graph TD
     Datastore --> Serve["osrm-routed detects new data<br/>zero downtime"]
     Skip --> Poll
     Serve --> Poll
+    Trigger --> Poll
 
+    style Auto fill:#dcfce7,stroke:#16a34a
     style Datastore fill:#dcfce7,stroke:#16a34a
     style Serve fill:#dcfce7,stroke:#16a34a
 ```
 
 ### Photon Rolling Update
 
+Triggered automatically by the data-change monitor or manually via the API:
+
 ```mermaid
 sequenceDiagram
+    participant Monitor as Data-Change Monitor
     participant Manager
     participant Blue as Photon Blue
     participant Green as Photon Green
     participant NGINX
 
+    Monitor->>Manager: Nominatim data changed
     Note over NGINX: Both instances serving traffic
 
-    Manager->>Blue: Trigger update
-    Blue->>Blue: Stop, delete index, reimport
-    Note over NGINX: All traffic → Green
-    Blue->>Blue: Restart, ready
+    Manager->>Blue: Trigger update (auto or manual)
+    Blue->>Blue: Stop, backup index, reimport from Nominatim
+    Note over NGINX: All traffic → Green (failover)
+    Blue->>Blue: Verify new index, restart
     Note over NGINX: Both instances serving traffic
 
+    Manager->>Manager: Wait for Blue to finish (max 30 min)
     Manager->>Green: Trigger update
-    Green->>Green: Stop, delete index, reimport
-    Note over NGINX: All traffic → Blue
-    Green->>Green: Restart, ready
+    Green->>Green: Stop, backup index, reimport from Nominatim
+    Note over NGINX: All traffic → Blue (failover)
+    Green->>Green: Verify new index, restart
     Note over NGINX: Both instances serving traffic
 
     Note over Blue,Green: Zero failed requests throughout

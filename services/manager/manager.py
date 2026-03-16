@@ -22,6 +22,8 @@ import sys
 import time
 import threading
 import tempfile
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -36,6 +38,20 @@ AUTO_SERVICES = {
     "tile_server": "Auto-updates via minutely diffs",
     "nominatim": "Auto-updates via replication URL",
 }
+
+# ---------------------------------------------------------------------------
+# Nominatim → Photon auto-update configuration
+# ---------------------------------------------------------------------------
+# When enabled, the manager polls Nominatim's /status endpoint and
+# auto-triggers a rolling Photon update when Nominatim's data_updated
+# timestamp is newer than Photon's last import.
+NOMINATIM_AUTO_UPDATE = os.environ.get("NOMINATIM_AUTO_UPDATE", "enabled").lower() in ("1", "true", "yes", "enabled")
+NOMINATIM_HOST = os.environ.get("NOMINATIM_HOST", "nominatim")
+NOMINATIM_PORT = int(os.environ.get("NOMINATIM_STATUS_PORT", "8080"))
+NOMINATIM_POLL_INTERVAL = int(os.environ.get("NOMINATIM_POLL_INTERVAL", "300"))  # 5 min
+# Minimum seconds between auto-triggered Photon updates (default 1 hour)
+# This prevents rapid re-triggers when Nominatim applies many small diffs.
+PHOTON_AUTO_UPDATE_COOLDOWN = int(os.environ.get("PHOTON_AUTO_UPDATE_COOLDOWN", "3600"))
 
 # Rate limiting: min seconds between update requests per service
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "60"))
@@ -253,6 +269,29 @@ def build_status():
     for svc, msg in AUTO_SERVICES.items():
         result[svc] = {"state": "auto", "message": msg}
 
+    # Nominatim data-change monitor info
+    if NOMINATIM_AUTO_UPDATE:
+        def _fmt_trigger_time(ts):
+            if ts > 0:
+                return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return None
+
+        result["nominatim"]["data_change_monitor"] = {
+            "enabled": True,
+            "last_data_updated": _last_nominatim_data_updated,
+            "poll_interval_s": NOMINATIM_POLL_INTERVAL,
+            "auto_triggers": {
+                "photon": {
+                    "last_auto_trigger": _fmt_trigger_time(_last_photon_auto_trigger),
+                    "cooldown_s": PHOTON_AUTO_UPDATE_COOLDOWN,
+                },
+                "osrm": {
+                    "last_auto_trigger": _fmt_trigger_time(_last_osrm_auto_trigger),
+                    "cooldown_s": OSRM_AUTO_UPDATE_COOLDOWN,
+                },
+            },
+        }
+
     return result
 
 
@@ -309,6 +348,177 @@ def trigger_photon_rolling():
     threading.Thread(target=_trigger_second, daemon=True).start()
 
     return ["photon"], []
+
+
+# ---------------------------------------------------------------------------
+# Nominatim data-change monitor → auto-triggers Photon + OSRM
+# ---------------------------------------------------------------------------
+_last_nominatim_data_updated = None  # ISO timestamp from Nominatim /status
+_last_photon_auto_trigger = 0.0      # wall-clock time of last auto-trigger
+_last_osrm_auto_trigger = 0.0        # wall-clock time of last OSRM auto-trigger
+# OSRM uses its own cooldown (same env var as Photon by default)
+OSRM_AUTO_UPDATE_COOLDOWN = int(os.environ.get("OSRM_AUTO_UPDATE_COOLDOWN", "3600"))
+
+
+def _parse_iso_timestamp(ts_str):
+    """Parse an ISO 8601 timestamp string to a datetime object.
+
+    Handles formats like:
+      2024-01-15T12:34:56+00:00
+      2024-01-15 12:34:56+00:00
+      2024-01-15T12:34:56Z
+    """
+    if not ts_str:
+        return None
+    try:
+        # Python 3.7+ fromisoformat handles most formats
+        # but not the trailing Z — normalize it
+        clean = ts_str.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(clean)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _get_nominatim_data_updated():
+    """Poll Nominatim /status and return the data_updated timestamp string."""
+    url = f"http://{NOMINATIM_HOST}:{NOMINATIM_PORT}/status?format=json"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("data_updated")
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
+        print(f"[manager] nominatim-monitor: failed to poll /status: {e}", flush=True)
+        return None
+
+
+def _get_photon_last_update():
+    """Get the most recent last_update timestamp across Photon instances."""
+    timestamps = []
+    for inst in PHOTON_INSTANCES:
+        lu = read_last_update(f"photon-{inst}")
+        if lu:
+            timestamps.append(lu)
+    if not timestamps:
+        return None
+    return max(timestamps)
+
+
+def _trigger_osrm_auto():
+    """Auto-trigger OSRM update if not already in progress."""
+    trigger_path = os.path.join(TRIGGER_DIR, "osrm.trigger")
+    if os.path.exists(trigger_path):
+        print("[manager] nominatim-monitor: OSRM trigger already pending, skipping", flush=True)
+        inc_metric("updates_skipped_total", "osrm_auto_already_pending")
+        return False
+    st = read_json(os.path.join(TRIGGER_DIR, "osrm.status"))
+    if st and st.get("state") == "updating":
+        print("[manager] nominatim-monitor: OSRM update already in progress, skipping", flush=True)
+        inc_metric("updates_skipped_total", "osrm_auto_in_progress")
+        return False
+    write_json_atomic(trigger_path, {"requested_at": now_iso(), "requested_by": "nominatim-monitor"})
+    inc_metric("updates_triggered_total", "osrm_auto")
+    print("[manager] nominatim-monitor: OSRM update triggered", flush=True)
+    return True
+
+
+def _nominatim_monitor_loop():
+    """Background thread: polls Nominatim and auto-triggers Photon + OSRM updates.
+
+    When Nominatim applies replication diffs (data_updated changes),
+    this triggers:
+    1. Photon rolling update (reimport from Nominatim)
+    2. OSRM update (re-download PBF from Geofabrik — likely also updated)
+
+    Each service has its own independent cooldown to prevent overload.
+    """
+    global _last_nominatim_data_updated, _last_photon_auto_trigger, _last_osrm_auto_trigger
+
+    print(f"[manager] nominatim-monitor: started (poll every {NOMINATIM_POLL_INTERVAL}s, "
+          f"photon cooldown {PHOTON_AUTO_UPDATE_COOLDOWN}s, "
+          f"osrm cooldown {OSRM_AUTO_UPDATE_COOLDOWN}s)", flush=True)
+
+    # Wait for Nominatim to become healthy before first poll
+    while True:
+        data_updated = _get_nominatim_data_updated()
+        if data_updated:
+            _last_nominatim_data_updated = data_updated
+            print(f"[manager] nominatim-monitor: initial data_updated = {data_updated}", flush=True)
+            break
+        time.sleep(30)
+
+    while True:
+        time.sleep(NOMINATIM_POLL_INTERVAL)
+
+        data_updated = _get_nominatim_data_updated()
+        if not data_updated:
+            continue
+
+        # Has Nominatim's data changed since we last checked?
+        if data_updated == _last_nominatim_data_updated:
+            continue
+
+        prev = _last_nominatim_data_updated
+        _last_nominatim_data_updated = data_updated
+        print(f"[manager] nominatim-monitor: data_updated changed: {prev} → {data_updated}", flush=True)
+
+        now = time.time()
+
+        # --- Photon auto-trigger ---
+        photon_triggered = False
+        photon_lu = _get_photon_last_update()
+        photon_skip = False
+        if photon_lu:
+            nom_dt = _parse_iso_timestamp(data_updated)
+            photon_dt = _parse_iso_timestamp(photon_lu)
+            if nom_dt and photon_dt and nom_dt <= photon_dt:
+                print(f"[manager] nominatim-monitor: Photon already up-to-date "
+                      f"(photon={photon_lu} >= nominatim={data_updated})", flush=True)
+                photon_skip = True
+
+        if not photon_skip:
+            if now - _last_photon_auto_trigger < PHOTON_AUTO_UPDATE_COOLDOWN:
+                remaining = int(PHOTON_AUTO_UPDATE_COOLDOWN - (now - _last_photon_auto_trigger))
+                print(f"[manager] nominatim-monitor: Photon cooldown active "
+                      f"({remaining}s remaining)", flush=True)
+            else:
+                print(f"[manager] nominatim-monitor: triggering Photon rolling update", flush=True)
+                with _update_lock:
+                    triggered, skipped = trigger_photon_rolling()
+                if triggered:
+                    _last_photon_auto_trigger = now
+                    photon_triggered = True
+                    inc_metric("updates_triggered_total", "photon_auto")
+                    print(f"[manager] nominatim-monitor: Photon rolling update triggered", flush=True)
+                else:
+                    reasons = ", ".join(s.get("reason", "unknown") for s in skipped)
+                    print(f"[manager] nominatim-monitor: Photon skipped — {reasons}", flush=True)
+                    inc_metric("updates_skipped_total", "photon_auto_skipped")
+
+        # --- OSRM auto-trigger ---
+        # Geofabrik publishes PBF extracts alongside diffs, so when
+        # Nominatim gets new data, a new PBF is likely available too.
+        # OSRM's download_pbf() uses If-Modified-Since, so a trigger
+        # costs only a HEAD request if the PBF hasn't changed yet.
+        osrm_triggered = False
+        if now - _last_osrm_auto_trigger < OSRM_AUTO_UPDATE_COOLDOWN:
+            remaining = int(OSRM_AUTO_UPDATE_COOLDOWN - (now - _last_osrm_auto_trigger))
+            print(f"[manager] nominatim-monitor: OSRM cooldown active "
+                  f"({remaining}s remaining)", flush=True)
+        else:
+            with _update_lock:
+                osrm_triggered = _trigger_osrm_auto()
+            if osrm_triggered:
+                _last_osrm_auto_trigger = now
+
+        if photon_triggered or osrm_triggered:
+            services = []
+            if photon_triggered:
+                services.append("Photon")
+            if osrm_triggered:
+                services.append("OSRM")
+            print(f"[manager] nominatim-monitor: auto-triggered {' + '.join(services)} "
+                  f"(Nominatim data_updated={data_updated})", flush=True)
 
 
 def check_rate_limit(service):
@@ -591,6 +801,19 @@ class ManagerHandler(BaseHTTPRequestHandler):
             for svc, count in sorted(_metrics["update_errors_total"].items()):
                 lines.append(f'manager_update_errors_total{{service="{svc}"}} {count}')
 
+        # Nominatim data-change monitor
+        if NOMINATIM_AUTO_UPDATE:
+            lines.append("")
+            lines.append("# HELP manager_data_change_monitor_enabled Nominatim data-change monitor is enabled.")
+            lines.append("# TYPE manager_data_change_monitor_enabled gauge")
+            lines.append("manager_data_change_monitor_enabled 1")
+
+            lines.append("")
+            lines.append("# HELP manager_auto_trigger_timestamp_seconds Last auto-trigger Unix timestamp by service.")
+            lines.append("# TYPE manager_auto_trigger_timestamp_seconds gauge")
+            lines.append(f'manager_auto_trigger_timestamp_seconds{{service="photon"}} {_last_photon_auto_trigger}')
+            lines.append(f'manager_auto_trigger_timestamp_seconds{{service="osrm"}} {_last_osrm_auto_trigger}')
+
         # Service state from trigger files (as gauges for alerting)
         lines.append("")
         lines.append("# HELP manager_service_up Service state: 1=idle, 0.5=updating, 0=error.")
@@ -643,6 +866,18 @@ if __name__ == "__main__":
         print(f"[manager] Rate limit: {RATE_LIMIT_SECONDS}s between updates per service", flush=True)
     else:
         print("[manager] WARNING: Rate limiting is DISABLED (RATE_LIMIT_SECONDS=0)", flush=True)
+
+    # Start Nominatim data-change monitor (auto-triggers Photon + OSRM)
+    if NOMINATIM_AUTO_UPDATE:
+        print(f"[manager] Data-change monitor: ENABLED "
+              f"(nominatim={NOMINATIM_HOST}:{NOMINATIM_PORT}, "
+              f"poll={NOMINATIM_POLL_INTERVAL}s, "
+              f"photon_cooldown={PHOTON_AUTO_UPDATE_COOLDOWN}s, "
+              f"osrm_cooldown={OSRM_AUTO_UPDATE_COOLDOWN}s)", flush=True)
+        threading.Thread(target=_nominatim_monitor_loop, daemon=True, name="nominatim-monitor").start()
+    else:
+        print("[manager] Data-change monitor: DISABLED", flush=True)
+
     server = ThreadedHTTPServer(("0.0.0.0", LISTEN_PORT), ManagerHandler)
     try:
         server.serve_forever()

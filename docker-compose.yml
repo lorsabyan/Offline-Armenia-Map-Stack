@@ -217,10 +217,19 @@ services:
 
   manager:
     build: ./services/manager
+    depends_on:
+      nominatim:
+        condition: service_started
     environment:
       - TRIGGER_DIR=/triggers
       - UPDATE_TOKEN=${UPDATE_TOKEN:-}
       - RATE_LIMIT_SECONDS=${RATE_LIMIT_SECONDS:-60}
+      - NOMINATIM_AUTO_UPDATE=${NOMINATIM_AUTO_UPDATE:-enabled}
+      - NOMINATIM_HOST=nominatim
+      - NOMINATIM_STATUS_PORT=8080
+      - NOMINATIM_POLL_INTERVAL=${NOMINATIM_POLL_INTERVAL:-300}
+      - PHOTON_AUTO_UPDATE_COOLDOWN=${PHOTON_AUTO_UPDATE_COOLDOWN:-3600}
+      - OSRM_AUTO_UPDATE_COOLDOWN=${OSRM_AUTO_UPDATE_COOLDOWN:-3600}
     volumes:
       - update-triggers:/triggers
     deploy:
