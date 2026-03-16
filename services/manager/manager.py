@@ -18,6 +18,7 @@ Endpoints:
 import hmac
 import json
 import os
+import re
 import sys
 import time
 import threading
@@ -30,6 +31,9 @@ from socketserver import ThreadingMixIn
 
 TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/triggers")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8000"))
+if not (1 <= LISTEN_PORT <= 65535):
+    print(f"[manager] FATAL: LISTEN_PORT={LISTEN_PORT} is not in range 1-65535", flush=True)
+    sys.exit(1)
 UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "")
 
 UPDATABLE = {"osrm", "photon"}
@@ -47,6 +51,10 @@ AUTO_SERVICES = {
 # timestamp is newer than Photon's last import.
 NOMINATIM_AUTO_UPDATE = os.environ.get("NOMINATIM_AUTO_UPDATE", "enabled").lower() in ("1", "true", "yes", "enabled")
 NOMINATIM_HOST = os.environ.get("NOMINATIM_HOST", "nominatim")
+# Validate NOMINATIM_HOST to prevent SSRF via misconfigured env vars
+if not re.match(r'^[a-zA-Z0-9._-]+$', NOMINATIM_HOST):
+    print(f"[manager] FATAL: NOMINATIM_HOST contains invalid characters: {NOMINATIM_HOST!r}", flush=True)
+    sys.exit(1)
 NOMINATIM_PORT = int(os.environ.get("NOMINATIM_STATUS_PORT", "8080"))
 NOMINATIM_POLL_INTERVAL = int(os.environ.get("NOMINATIM_POLL_INTERVAL", "300"))  # 5 min
 # Minimum seconds between auto-triggered Photon updates (default 1 hour)
@@ -153,15 +161,13 @@ def write_json_atomic(path, data):
             json.dump(data, f)
         os.replace(tmp_path, path)
     except OSError as e:
-        print(f"[manager] WARNING: atomic write failed for {path}: {e}", flush=True)
+        print(f"[manager] ERROR: atomic write failed for {path}: {e}", flush=True)
         if tmp_path:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
-        # Fallback to direct write
-        with open(path, "w") as f:
-            json.dump(data, f)
+        raise
 
 
 def load_rate_limits():
@@ -172,7 +178,9 @@ def load_rate_limits():
         return
     now = time.time()
     restored = 0
-    for svc, ts in data.items():
+    for svc, ts in list(data.items())[:100]:  # Cap entries to prevent memory exhaustion
+        if not isinstance(svc, str):
+            continue
         if isinstance(ts, (int, float)) and now - ts < RATE_LIMIT_SECONDS:
             _last_trigger_time[svc] = ts
             restored += 1
@@ -245,12 +253,14 @@ def build_photon_status():
     latest = max(last_updates) if last_updates else None
     any_pending = any(inst.get("trigger_pending") for inst in instances.values())
 
+    rolling_pending = _rolling_update_thread is not None and _rolling_update_thread.is_alive()
     return {
         "state": agg_state,
         "message": agg_msg,
         "last_update": latest,
         "updated_at": now_iso(),
         "trigger_pending": any_pending,
+        "rolling_update_pending": rolling_pending,
         "instances": instances,
     }
 
@@ -276,7 +286,7 @@ def build_status():
                 return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             return None
 
-        result["nominatim"]["data_change_monitor"] = {
+        result.setdefault("nominatim", {"state": "auto", "message": "Auto-updates via replication URL"})["data_change_monitor"] = {
             "enabled": True,
             "last_data_updated": _last_nominatim_data_updated,
             "poll_interval_s": NOMINATIM_POLL_INTERVAL,
@@ -295,6 +305,8 @@ def build_status():
     return result
 
 
+_rolling_update_thread = None  # Track in-flight rolling update thread
+
 def trigger_photon_rolling():
     """Trigger a rolling update of both Photon instances.
 
@@ -302,6 +314,7 @@ def trigger_photon_rolling():
     blue to finish (state goes back to idle) then triggers green.
     This guarantees at least one instance is always serving.
     """
+    global _rolling_update_thread
     first, second = PHOTON_INSTANCES[0], PHOTON_INSTANCES[1]
 
     first_trigger = os.path.join(TRIGGER_DIR, f"photon-{first}.trigger")
@@ -345,7 +358,8 @@ def trigger_photon_rolling():
             print(f"[manager] ERROR: _trigger_second thread failed: {e}", flush=True)
             inc_metric("update_errors_total", "photon")
 
-    threading.Thread(target=_trigger_second, daemon=True).start()
+    _rolling_update_thread = threading.Thread(target=_trigger_second, daemon=True, name="rolling-update")
+    _rolling_update_thread.start()
 
     return ["photon"], []
 
@@ -431,21 +445,37 @@ def _nominatim_monitor_loop():
     2. OSRM update (re-download PBF from Geofabrik — likely also updated)
 
     Each service has its own independent cooldown to prevent overload.
+    Wrapped in a crash-protection loop: if an unexpected error occurs,
+    the monitor restarts after a delay rather than dying silently.
     """
+    while True:
+        try:
+            _nominatim_monitor_inner()
+        except Exception as e:
+            print(f"[manager] CRITICAL: nominatim-monitor crashed: {e}", flush=True)
+            print("[manager] nominatim-monitor: restarting in 60s...", flush=True)
+            time.sleep(60)
+
+
+def _nominatim_monitor_inner():
     global _last_nominatim_data_updated, _last_photon_auto_trigger, _last_osrm_auto_trigger
 
     print(f"[manager] nominatim-monitor: started (poll every {NOMINATIM_POLL_INTERVAL}s, "
           f"photon cooldown {PHOTON_AUTO_UPDATE_COOLDOWN}s, "
           f"osrm cooldown {OSRM_AUTO_UPDATE_COOLDOWN}s)", flush=True)
 
-    # Wait for Nominatim to become healthy before first poll
+    # Wait for Nominatim to become healthy before first poll (exponential backoff)
+    backoff = 10
+    max_backoff = 300  # 5 minutes
     while True:
         data_updated = _get_nominatim_data_updated()
         if data_updated:
             _last_nominatim_data_updated = data_updated
             print(f"[manager] nominatim-monitor: initial data_updated = {data_updated}", flush=True)
             break
-        time.sleep(30)
+        print(f"[manager] nominatim-monitor: waiting for Nominatim (retry in {backoff}s)", flush=True)
+        time.sleep(backoff)
+        backoff = min(backoff * 2, max_backoff)
 
     while True:
         time.sleep(NOMINATIM_POLL_INTERVAL)
@@ -547,17 +577,20 @@ class ManagerHandler(BaseHTTPRequestHandler):
         print(f"[manager] {msg}", flush=True)
 
     # -- CORS helpers --
-    def _cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    def _cors_headers(self, readonly=True):
+        """Send CORS headers. Only read-only endpoints get wildcard origin."""
+        if readonly:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
-    def send_json(self, code, data):
+    def send_json(self, code, data, cors=True):
         body = json.dumps(data, indent=2).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self._cors_headers()
+        if cors:
+            self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -576,7 +609,9 @@ class ManagerHandler(BaseHTTPRequestHandler):
     # -- Routes --
     def do_OPTIONS(self):
         self.send_response(204)
-        self._cors_headers()
+        # Only send CORS for read-only endpoints, not /update
+        if self.path != "/update":
+            self._cors_headers()
         self.end_headers()
 
     def do_GET(self):
@@ -595,6 +630,11 @@ class ManagerHandler(BaseHTTPRequestHandler):
         if self.path == "/update":
             if not self._check_auth():
                 return
+            # Prevent slow-loris: cap socket read to 10 seconds
+            try:
+                self.connection.settimeout(10)
+            except OSError:
+                pass
             try:
                 length = int(self.headers.get("Content-Length", 0))
             except (ValueError, TypeError):
@@ -640,6 +680,8 @@ class ManagerHandler(BaseHTTPRequestHandler):
         source = body.get("source", "api")
         if not isinstance(source, str):
             source = "api"
+        # Sanitize source: cap length, restrict to safe characters
+        source = re.sub(r'[^a-zA-Z0-9._\-]', '', source)[:64] or "api"
 
         triggered = []
         skipped = []
@@ -705,6 +747,7 @@ class ManagerHandler(BaseHTTPRequestHandler):
                     else "No updates triggered"
                 ),
             },
+            cors=False,
         )
 
     # -- GET /progress (SSE) --
@@ -746,6 +789,11 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 _sse_connection_count -= 1
                 set_metric("sse_connections_current", _sse_connection_count)
 
+    @staticmethod
+    def _prom_escape(value):
+        """Escape a string for use as a Prometheus label value."""
+        return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
     # -- GET /metrics (Prometheus exposition format) --
     def _handle_metrics(self):
         lines = []
@@ -760,28 +808,28 @@ class ManagerHandler(BaseHTTPRequestHandler):
             lines.append("# TYPE manager_http_requests_total counter")
             for label, count in sorted(_metrics["http_requests_total"].items()):
                 method, path = label.split(" ", 1)
-                lines.append(f'manager_http_requests_total{{method="{method}",path="{path}"}} {count}')
+                lines.append(f'manager_http_requests_total{{method="{self._prom_escape(method)}",path="{self._prom_escape(path)}"}} {count}')
 
             # Update trigger counters
             lines.append("")
             lines.append("# HELP manager_updates_triggered_total Total updates triggered by service.")
             lines.append("# TYPE manager_updates_triggered_total counter")
             for svc, count in sorted(_metrics["updates_triggered_total"].items()):
-                lines.append(f'manager_updates_triggered_total{{service="{svc}"}} {count}')
+                lines.append(f'manager_updates_triggered_total{{service="{self._prom_escape(svc)}"}} {count}')
 
             # Update skip counters
             lines.append("")
             lines.append("# HELP manager_updates_skipped_total Total updates skipped by service.")
             lines.append("# TYPE manager_updates_skipped_total counter")
             for label, count in sorted(_metrics["updates_skipped_total"].items()):
-                lines.append(f'manager_updates_skipped_total{{label="{label}"}} {count}')
+                lines.append(f'manager_updates_skipped_total{{label="{self._prom_escape(label)}"}} {count}')
 
             # Rate limit rejections
             lines.append("")
             lines.append("# HELP manager_rate_limit_rejections_total Rate limit rejections by service.")
             lines.append("# TYPE manager_rate_limit_rejections_total counter")
             for svc, count in sorted(_metrics["rate_limit_rejections_total"].items()):
-                lines.append(f'manager_rate_limit_rejections_total{{service="{svc}"}} {count}')
+                lines.append(f'manager_rate_limit_rejections_total{{service="{self._prom_escape(svc)}"}} {count}')
 
             # SSE gauges
             lines.append("")
@@ -799,7 +847,7 @@ class ManagerHandler(BaseHTTPRequestHandler):
             lines.append("# HELP manager_update_errors_total Update errors by service.")
             lines.append("# TYPE manager_update_errors_total counter")
             for svc, count in sorted(_metrics["update_errors_total"].items()):
-                lines.append(f'manager_update_errors_total{{service="{svc}"}} {count}')
+                lines.append(f'manager_update_errors_total{{service="{self._prom_escape(svc)}"}} {count}')
 
         # Nominatim data-change monitor
         if NOMINATIM_AUTO_UPDATE:
@@ -823,12 +871,12 @@ class ManagerHandler(BaseHTTPRequestHandler):
         for svc, info in status.items():
             state = info.get("state", "idle")
             val = state_map.get(state, 0)
-            lines.append(f'manager_service_up{{service="{svc}",state="{state}"}} {val}')
+            lines.append(f'manager_service_up{{service="{self._prom_escape(svc)}",state="{self._prom_escape(state)}"}} {val}')
             if svc == "photon" and "instances" in info:
                 for inst, inst_info in info["instances"].items():
                     inst_state = inst_info.get("state", "idle")
                     inst_val = state_map.get(inst_state, 0)
-                    lines.append(f'manager_service_up{{service="photon-{inst}",state="{inst_state}"}} {inst_val}')
+                    lines.append(f'manager_service_up{{service="photon-{self._prom_escape(inst)}",state="{self._prom_escape(inst_state)}"}} {inst_val}')
 
         body = "\n".join(lines) + "\n"
         body_bytes = body.encode()
@@ -851,8 +899,11 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     os.makedirs(TRIGGER_DIR, exist_ok=True)
-    # 0o777: shared volume between root (manager) and non-root users (osrm, photon)
-    os.chmod(TRIGGER_DIR, 0o777)
+    # 0o775: shared between manager and service group (not world-writable)
+    try:
+        os.chmod(TRIGGER_DIR, 0o775)
+    except OSError:
+        pass  # Non-root may not be able to chmod; volume permissions are set by Docker
     load_rate_limits()
     print(f"[manager] Listening on 0.0.0.0:{LISTEN_PORT}", flush=True)
     print(f"[manager] Trigger directory: {TRIGGER_DIR}", flush=True)
@@ -861,7 +912,8 @@ if __name__ == "__main__":
     if UPDATE_TOKEN:
         print("[manager] API token authentication enabled", flush=True)
     else:
-        print("[manager] WARNING: No UPDATE_TOKEN set — update endpoint is unprotected", flush=True)
+        print("[manager] WARNING: No UPDATE_TOKEN set — update endpoint is unprotected!", flush=True)
+        print("[manager] Set UPDATE_TOKEN in .env for production use.", flush=True)
     if RATE_LIMIT_SECONDS > 0:
         print(f"[manager] Rate limit: {RATE_LIMIT_SECONDS}s between updates per service", flush=True)
     else:

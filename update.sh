@@ -6,7 +6,7 @@ set -euo pipefail
 
 MANAGER_URL="${MANAGER_URL:-http://localhost/manager}"
 UPDATE_TOKEN="${UPDATE_TOKEN:-}"
-SERVICE="${1:-all}"
+SERVICE="all"
 FOLLOW=false
 
 usage() {
@@ -44,12 +44,12 @@ done
 # Status command
 if [ "$SERVICE" = "status" ]; then
   echo "Fetching update status..."
-  response=$(curl -sf "${MANAGER_URL}/status" 2>&1) || {
+  response=$(curl -sf "${MANAGER_URL}/status") || {
     echo "Error: Could not reach manager at ${MANAGER_URL}"
     echo "Make sure the Docker stack is running: docker compose up -d"
     exit 1
   }
-  echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+  printf '%s\n' "$response" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$response"
   exit 0
 fi
 
@@ -70,35 +70,53 @@ if [ -n "$UPDATE_TOKEN" ]; then
   CURL_ARGS+=(-H "Authorization: Bearer ${UPDATE_TOKEN}")
 fi
 CURL_ARGS+=(-d "{\"services\": ${svc_json}, \"source\": \"cli\"}")
-response=$(curl "${CURL_ARGS[@]}" 2>&1) || {
+response=$(curl "${CURL_ARGS[@]}") || {
   echo "Error: Could not reach manager at ${MANAGER_URL}"
   echo "Make sure the Docker stack is running: docker compose up -d"
   exit 1
 }
 
-echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+printf '%s\n' "$response" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$response"
 
 # Follow progress
 if [ "$FOLLOW" = true ]; then
   echo ""
   echo "Following progress (Ctrl+C to stop)..."
+  # Use process substitution to detect curl exit and capture PIPESTATUS
   curl -sf -N "${MANAGER_URL}/progress" 2>/dev/null | while IFS= read -r line; do
-    if [[ "$line" == data:* ]]; then
-      ts=$(date +"%H:%M:%S")
-      payload="${line#data: }"
-      # Extract states for display
-      osrm_state=$(echo "$payload" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('osrm',{}).get('state','?'))" 2>/dev/null || echo "?")
-      photon_state=$(echo "$payload" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('photon',{}).get('state','?'))" 2>/dev/null || echo "?")
-      osrm_msg=$(echo "$payload" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('osrm',{}).get('message',''))" 2>/dev/null || echo "")
-      photon_msg=$(echo "$payload" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('photon',{}).get('message',''))" 2>/dev/null || echo "")
-      echo "[$ts] OSRM: $osrm_state — $osrm_msg | Photon: $photon_state — $photon_msg"
+    case "$line" in
+      data:*)
+        ts=$(date +"%H:%M:%S")
+        payload="${line#data: }"
+        # Single python3 invocation to parse all fields at once
+        read -r osrm_state photon_state osrm_msg photon_msg < <(
+          printf '%s\n' "$payload" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(
+        d.get('osrm',{}).get('state','?'),
+        d.get('photon',{}).get('state','?'),
+        d.get('osrm',{}).get('message',''),
+        d.get('photon',{}).get('message',''),
+    )
+except Exception:
+    print('? ? ? ?')
+" 2>/dev/null
+        ) || { osrm_state="?"; photon_state="?"; osrm_msg=""; photon_msg=""; }
+        echo "[$ts] OSRM: $osrm_state — $osrm_msg | Photon: $photon_state — $photon_msg"
 
-      # Exit when all idle
-      if [ "$osrm_state" = "idle" ] && [ "$photon_state" = "idle" ]; then
-        echo ""
-        echo "All updates complete."
-        break
-      fi
-    fi
+        # Exit when all idle
+        if [ "$osrm_state" = "idle" ] && [ "$photon_state" = "idle" ]; then
+          echo ""
+          echo "All updates complete."
+          break
+        fi
+        ;;
+    esac
   done
+  # Check if curl disconnected unexpectedly
+  if [ "${PIPESTATUS[0]:-0}" -ne 0 ]; then
+    echo "Warning: progress stream disconnected"
+  fi
 fi

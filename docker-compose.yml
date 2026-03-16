@@ -43,12 +43,13 @@ services:
       - tiles-db:/var/lib/postgresql/15/main
       - tiles-cache:/var/cache/renderd
       - tiles-data:/data
-    ports:
-      - "127.0.0.1:8080:80"
+    networks:
+      - map-internal
     deploy:
       resources:
         limits:
           memory: 4g
+          cpus: '2.0'
         reservations:
           memory: 1g
     logging:
@@ -73,10 +74,13 @@ services:
       - NOMINATIM_PASSWORD=${NOMINATIM_PASSWORD}
     volumes:
       - nominatim-data:/var/lib/postgresql/14/main
+    networks:
+      - map-internal
     deploy:
       resources:
         limits:
           memory: 4g
+          cpus: '2.0'
         reservations:
           memory: 1g
     logging:
@@ -110,6 +114,8 @@ services:
     volumes:
       - photon-data-blue:/photon/photon_data
       - update-triggers:/triggers
+    networks:
+      - map-internal
     depends_on:
       nominatim:
         condition: service_healthy
@@ -119,6 +125,7 @@ services:
       resources:
         limits:
           memory: 2g
+          cpus: '1.0'
         reservations:
           memory: 512m
     logging:
@@ -152,6 +159,8 @@ services:
     volumes:
       - photon-data-green:/photon/photon_data
       - update-triggers:/triggers
+    networks:
+      - map-internal
     depends_on:
       nominatim:
         condition: service_healthy
@@ -161,6 +170,7 @@ services:
       resources:
         limits:
           memory: 2g
+          cpus: '1.0'
         reservations:
           memory: 512m
     logging:
@@ -193,13 +203,14 @@ services:
       - osrm-data:/var/osrm
       - osm-downloads:/osm
       - update-triggers:/triggers
-    ports:
-      - "127.0.0.1:5002:5000"
+    networks:
+      - map-internal
     shm_size: '2g'
     deploy:
       resources:
         limits:
           memory: 6g   # Needs headroom: 2g shm + osrm-extract during updates
+          cpus: '2.0'
         reservations:
           memory: 2g
     logging:
@@ -219,7 +230,7 @@ services:
     build: ./services/manager
     depends_on:
       nominatim:
-        condition: service_started
+        condition: service_healthy
     environment:
       - TRIGGER_DIR=/triggers
       - UPDATE_TOKEN=${UPDATE_TOKEN:-}
@@ -232,10 +243,13 @@ services:
       - OSRM_AUTO_UPDATE_COOLDOWN=${OSRM_AUTO_UPDATE_COOLDOWN:-3600}
     volumes:
       - update-triggers:/triggers
+    networks:
+      - map-internal
     deploy:
       resources:
         limits:
           memory: 256m
+          cpus: '0.5'
     logging:
       driver: json-file
       options:
@@ -251,7 +265,7 @@ services:
 
   nginx:
     # Pinned: nginx:1.27-alpine
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     depends_on:
       tile-server:
         condition: service_started
@@ -269,10 +283,13 @@ services:
       - ./test-app:/usr/share/nginx/html/test-app:ro
     ports:
       - "127.0.0.1:80:80"
+    networks:
+      - map-internal
     deploy:
       resources:
         limits:
           memory: 512m
+          cpus: '0.5'
     logging:
       driver: json-file
       options:
@@ -285,6 +302,10 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+
+networks:
+  map-internal:
+    driver: bridge
 
 volumes:
   tiles-db:

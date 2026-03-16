@@ -14,13 +14,19 @@ OSRM_DATASET_NAME=${OSRM_DATASET_NAME:-osrm_live}
 TRIGGER_DIR=${TRIGGER_DIR:-/triggers}
 POLL_INTERVAL=${POLL_INTERVAL:-30}
 
-PBF_BASENAME=$(basename "$OSM_PBF_URL")
+# Strip query strings from URL before extracting basename
+PBF_BASENAME=$(basename "${OSM_PBF_URL%%\?*}")
 PBF_PATH="${OSM_DOWNLOAD_DIR}/${PBF_BASENAME}"
 OSRM_BASENAME=${OSRM_BASENAME:-${PBF_BASENAME%%.osm.pbf}}
 OSRM_BASE_PATH="${OSRM_DATA_DIR}/${OSRM_BASENAME}.osrm"
 
 SERVER_PID=""
 UPDATE_PID=""
+CRASH_COUNT=0
+MAX_CRASH_RESTARTS=5
+
+# Register trap early — before any side effects
+trap 'stop_server; [ -n "${UPDATE_PID:-}" ] && kill "$UPDATE_PID" 2>/dev/null; wait; exit 0' SIGINT SIGTERM
 
 mkdir -p "$OSRM_DATA_DIR" "$OSM_DOWNLOAD_DIR" "$TRIGGER_DIR"
 
@@ -32,7 +38,7 @@ write_status() {
   local state="$1" message="$2" progress="${3:-}"
   local ts last_update=""
   ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  [ -f "${TRIGGER_DIR}/osrm.last_update" ] && last_update=$(cat "${TRIGGER_DIR}/osrm.last_update")
+  [ -f "${TRIGGER_DIR}/osrm.last_update" ] && last_update=$(cat "${TRIGGER_DIR}/osrm.last_update" 2>/dev/null || true)
   local status_file="${TRIGGER_DIR}/osrm.status"
   local tmp_file="${status_file}.tmp.$$"
   # Use jq for proper JSON escaping; fall back to minimal JSON on failure
@@ -40,7 +46,8 @@ write_status() {
   if ! jq -n --arg s "$state" --arg m "$message" --arg p "$progress" \
     --arg lu "$last_update" --arg ts "$ts" \
     '{state:$s,message:$m,progress:$p,last_update:$lu,updated_at:$ts}' > "$tmp_file" 2>/dev/null; then
-    printf '{"state":"%s","message":"status write degraded","updated_at":"%s"}' "$state" "$ts" > "$tmp_file"
+    printf '{"state":"%s","message":"status write degraded","updated_at":"%s"}' \
+      "${state//\"/\\\"}" "$ts" > "$tmp_file"
   fi
   mv -f "$tmp_file" "$status_file"
 }
@@ -144,18 +151,18 @@ prepare_osrm() {
     nice -n 10 ionice -c 2 -n 7 osrm-contract "$tmp_base"
   fi
 
+  # Move all artifacts directly — server reads from shared memory (osrm-datastore),
+  # not from files on disk, so the file race window only matters during load_data
   log "Switching active dataset"
   for artifact in "$tmp_dir"/"${OSRM_BASENAME}".osrm*; do
     [ -e "$artifact" ] || continue
     local name target
     name=$(basename "$artifact")
     target="${OSRM_DATA_DIR}/${name}"
-    mv -f "$artifact" "${target}.next"
-    mv -f "${target}.next" "$target"
+    mv -f "$artifact" "$target"
   done
   touch "${OSRM_BASE_PATH}.timestamp"
   trap - RETURN
-  rm -rf "$tmp_dir"
   log "OSRM dataset ready"
 }
 
@@ -242,10 +249,6 @@ schedule_updates() {
   UPDATE_PID=$!
 }
 
-# Kill the update subshell's entire process group to avoid orphaning
-# child processes (curl, osrm-extract, etc.) during docker compose restart
-trap 'stop_server; [ -n "${UPDATE_PID:-}" ] && kill -- -"$UPDATE_PID" 2>/dev/null; wait; exit 0' SIGINT SIGTERM
-
 download_pbf || true
 if [ ! -s "$PBF_PATH" ]; then
   log "OSM extract not available at $PBF_PATH"
@@ -261,16 +264,33 @@ write_status "idle" "Service started, data loaded"
 start_server
 schedule_updates
 
-# Monitor server; restart in-process on crash (faster than full container restart)
+# Monitor server; restart in-process on crash with backoff and circuit breaker
 while true; do
   wait "$SERVER_PID" || true
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    log "WARNING: osrm-routed crashed, restarting..."
-    write_status "error" "Server crashed, restarting"
+    CRASH_COUNT=$((CRASH_COUNT + 1))
+    if [ "$CRASH_COUNT" -gt "$MAX_CRASH_RESTARTS" ]; then
+      log "CRITICAL: osrm-routed crashed $CRASH_COUNT times, giving up (container will restart)"
+      write_status "error" "Server crashed repeatedly, restarting container"
+      exit 1
+    fi
+    backoff=$((CRASH_COUNT * 5))
+    log "WARNING: osrm-routed crashed (attempt ${CRASH_COUNT}/${MAX_CRASH_RESTARTS}), restarting in ${backoff}s..."
+    write_status "error" "Server crashed, restarting (attempt ${CRASH_COUNT})"
+    sleep "$backoff"
     start_server
-    sleep 5
-    if kill -0 "$SERVER_PID" 2>/dev/null; then
+    # Wait 60s stability window before resetting crash counter
+    local stable=true
+    for i in $(seq 1 12); do
+      sleep 5
+      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        stable=false
+        break
+      fi
+    done
+    if [ "$stable" = true ]; then
       write_status "idle" "Server restarted after crash"
+      CRASH_COUNT=0
     fi
   fi
 done

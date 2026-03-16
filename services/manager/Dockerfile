@@ -8,6 +8,10 @@ ENV PYTHONUNBUFFERED=1
 COPY manager.py /app/manager.py
 WORKDIR /app
 
+RUN addgroup -g 1000 manager && adduser -D -u 1000 -G manager manager \
+    && chown -R manager:manager /app
+USER manager
+
 EXPOSE 8000
 
 CMD ["python", "manager.py"]
