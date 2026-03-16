@@ -936,6 +936,15 @@ function esc(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+// Delegated click handler for copy buttons (avoids inline onclick + XSS risk)
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-copy]');
+  if (!btn) return;
+  navigator.clipboard.writeText(btn.dataset.copy).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1000);
+  });
+});
 function capitalise(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ') : '';
 }
@@ -1405,7 +1414,7 @@ function popupHtml(info) {
     <div class="popup-detail">${esc(info.detail)}</div>
     <div class="popup-coords-row">
       <span class="popup-coords">${coords}</span>
-      <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button>
+      <button class="popup-copy-btn" data-copy="${coords}">Copy</button>
     </div>`;
 }
 
@@ -1460,6 +1469,7 @@ function clearSearchMarkers() {
 function setupRouteInput(input, clearBtn, acContainer, which) {
   let debounce = null;
   let results = [];
+  let abortCtrl = null;
 
   function updateClear() {
     clearBtn.style.display = input.value.length > 0 ? 'block' : 'none';
@@ -1469,6 +1479,7 @@ function setupRouteInput(input, clearBtn, acContainer, which) {
     input.value = '';
     acContainer.classList.remove('visible');
     updateClear();
+    if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
     if (which === 'start') { routeStart = null; }
     else { routeEnd = null; }
     clearRouteDisplay();
@@ -1479,11 +1490,13 @@ function setupRouteInput(input, clearBtn, acContainer, which) {
   input.addEventListener('input', () => {
     updateClear();
     clearTimeout(debounce);
+    if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
     const q = input.value.trim();
     if (q.length < 2) { acContainer.classList.remove('visible'); return; }
     debounce = setTimeout(async () => {
       try {
-        results = await geocode(q);
+        abortCtrl = new AbortController();
+        results = await geocode(q, { signal: abortCtrl.signal });
         if (!results.length) { acContainer.classList.remove('visible'); return; }
         renderSearchResults(results, acContainer, (idx) => {
           const info = formatPhotonResult(results[idx]);
@@ -1831,7 +1844,7 @@ function snapPopupHtml(snap) {
   const coords = `${snap.snapLat.toFixed(5)}, ${snap.snapLng.toFixed(5)}`;
   parts.push(`<div class="popup-coords-row">
     <span class="popup-coords">${coords}</span>
-    <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button>
+    <button class="popup-copy-btn" data-copy="${coords}">Copy</button>
   </div>`);
 
   return parts.join('');
@@ -1925,7 +1938,7 @@ map.on('contextmenu', async (e) => {
       reversePopup.setHTML(
         `<div class="popup-detail" style="color:var(--red)">Reverse geocode failed</div>
          <div class="popup-coords-row"><span class="popup-coords">${coords}</span>
-         <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button></div>`
+         <button class="popup-copy-btn" data-copy="${coords}">Copy</button></div>`
       );
     }
 
@@ -1946,7 +1959,7 @@ map.on('contextmenu', async (e) => {
         reversePopup.setHTML(
           `<div class="popup-title">Unknown location</div>
            <div class="popup-coords-row"><span class="popup-coords">${coords}</span>
-           <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button></div>`
+           <button class="popup-copy-btn" data-copy="${coords}">Copy</button></div>`
         );
       }
     } catch (err) {
@@ -1955,7 +1968,7 @@ map.on('contextmenu', async (e) => {
       reversePopup.setHTML(
         `<div class="popup-detail" style="color:var(--red)">Reverse geocode failed</div>
          <div class="popup-coords-row"><span class="popup-coords">${coords}</span>
-         <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button></div>`
+         <button class="popup-copy-btn" data-copy="${coords}">Copy</button></div>`
       );
     }
   }
@@ -2032,6 +2045,9 @@ function clearRouteDisplay() {
 
 map.on('click', async (e) => {
   if (!routeMode) return;
+  // Clear any lingering snap/reverse-geocode visuals
+  if (reversePopup) { reversePopup.remove(); reversePopup = null; }
+  clearSnapVisuals();
   const { lng, lat } = e.lngLat;
 
   // Determine which point to set
@@ -2095,37 +2111,43 @@ let _routeSvg = null;
 let _routeCoords = null;
 let _connectorCoords = null;
 
+let _routeRaf = 0;
 function _updateRouteSvg() {
-  if (!_routeSvg || !_routeCoords) return;
-  const canvas = map.getCanvas();
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  _routeSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  _routeSvg.style.width = w + 'px';
-  _routeSvg.style.height = h + 'px';
+  if (_routeRaf) return; // Already scheduled
+  _routeRaf = requestAnimationFrame(() => {
+    _routeRaf = 0;
+    if (!_routeSvg || !_routeCoords) return;
+    const canvas = map.getCanvas();
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    _routeSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    _routeSvg.style.width = w + 'px';
+    _routeSvg.style.height = h + 'px';
 
-  // Main route path
-  const routePath = _routeSvg.querySelector('.route-path');
-  const outlinePath = _routeSvg.querySelector('.route-outline');
-  const points = _routeCoords.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
-  routePath.setAttribute('points', points);
-  outlinePath.setAttribute('points', points);
+    // Main route path
+    const routePath = _routeSvg.querySelector('.route-path');
+    const outlinePath = _routeSvg.querySelector('.route-outline');
+    const points = _routeCoords.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
+    routePath.setAttribute('points', points);
+    outlinePath.setAttribute('points', points);
 
-  // Connector paths
-  const connectorEls = _routeSvg.querySelectorAll('.route-connector');
-  if (_connectorCoords) {
-    _connectorCoords.forEach((seg, i) => {
-      if (connectorEls[i]) {
-        const cp = seg.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
-        connectorEls[i].setAttribute('points', cp);
-      }
-    });
-  }
+    // Connector paths
+    const connectorEls = _routeSvg.querySelectorAll('.route-connector');
+    if (_connectorCoords) {
+      _connectorCoords.forEach((seg, i) => {
+        if (connectorEls[i]) {
+          const cp = seg.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
+          connectorEls[i].setAttribute('points', cp);
+        }
+      });
+    }
+  });
 }
 
 function drawRoute(geometry) {
   clearRouteSvg();
 
   const c = geometry.coordinates;
+  if (!c || c.length === 0) return;
   _routeCoords = c;
 
   // Build connector segments
@@ -2683,11 +2705,11 @@ async function checkServices() {
     }
   ];
   let allOk = true;
-  for (const { id, check } of checks) {
+  await Promise.allSettled(checks.map(async ({ id, check }) => {
     const dot = document.getElementById(id);
     try { await check(); dot.className = 'status-dot ok'; }
     catch { dot.className = 'status-dot err'; allOk = false; }
-  }
+  }));
   statusMsg.textContent = allOk ? 'All services operational' : 'Some services unavailable';
 }
 </script>
