@@ -138,7 +138,7 @@
   /* ---------- Search results ---------- */
   #search-results {
     background: var(--bg); border-radius: var(--radius); box-shadow: var(--shadow-lg);
-    max-height: 300px; overflow-y: auto; display: none;
+    max-height: 400px; overflow-y: auto; display: none;
     scrollbar-width: thin;
   }
   .search-item {
@@ -154,6 +154,7 @@
     flex-shrink: 0; margin-top: 1px; color: var(--text-secondary);
   }
   .search-item-icon svg { width: 15px; height: 15px; }
+  .search-item-icon img { width: 17px; height: 17px; object-fit: contain; }
   .search-item-body { min-width: 0; flex: 1; }
   .search-item-name { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .search-item-detail { color: var(--text-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -286,7 +287,21 @@
   .maplibregl-popup-close-button {
     font-size: 18px; padding: 4px 8px; color: var(--text-muted);
   }
+  .popup-header {
+    display: flex; align-items: flex-start; gap: 6px; margin-bottom: 2px;
+  }
+  .popup-icon {
+    flex-shrink: 0; width: 22px; height: 22px; margin-top: 1px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .popup-icon img { width: 20px; height: 20px; object-fit: contain; }
+  .popup-icon svg { width: 18px; height: 18px; }
   .popup-title { font-weight: 700; margin-bottom: 2px; color: var(--text); }
+  .popup-category {
+    display: inline-block; font-size: 10px; font-weight: 600; text-transform: uppercase;
+    color: var(--blue); background: var(--blue-light); padding: 1px 6px;
+    border-radius: 4px; margin-bottom: 3px; letter-spacing: .3px;
+  }
   .popup-detail { color: var(--text-secondary); font-size: 12px; }
   .popup-coords-row {
     display: flex; align-items: center; justify-content: space-between; gap: 6px;
@@ -317,10 +332,8 @@
   /* ---------- Enhanced popup ---------- */
   .popup-snap-label {
     font-size: 10px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: .4px; margin-bottom: 4px;
-    display: flex; align-items: center; gap: 4px;
+    letter-spacing: .4px; margin-bottom: 1px;
   }
-  .popup-snap-label svg { width: 12px; height: 12px; flex-shrink: 0; }
   .popup-distance {
     font-size: 10px; color: var(--text-muted); margin-top: 2px;
   }
@@ -551,6 +564,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m10-10h-4M6 12H2"/></svg>
       <span>My location</span>
     </button>
+    <button id="snap-toggle" class="action-btn active" title="Toggle snap-to-nearest on right-click">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><path d="M12 2v4m0 16v-4m10-6h-4M2 12h4"/><path d="M17.66 6.34l-2.83 2.83M9.17 14.83l-2.83 2.83M17.66 17.66l-2.83-2.83M9.17 9.17L6.34 6.34"/></svg>
+      <span>Snap</span>
+    </button>
   </div>
   <div id="search-results"></div>
 </div>
@@ -698,6 +715,10 @@
         <div class="help-row">
           <span class="help-key">F</span>
           <div>Toggle fullscreen</div>
+        </div>
+        <div class="help-row">
+          <span class="help-key">S</span>
+          <div>Toggle snap mode</div>
         </div>
         <div class="help-row">
           <span class="help-key">?</span>
@@ -874,6 +895,13 @@ const routeDistEl = document.getElementById('route-dist');
 const routeDurEl = document.getElementById('route-dur');
 const routeStepsEl = document.getElementById('route-steps');
 const geolocateBtn = document.getElementById('geolocate-btn');
+const snapToggleBtn = document.getElementById('snap-toggle');
+let snapEnabled = true;
+snapToggleBtn.addEventListener('click', () => {
+  snapEnabled = !snapEnabled;
+  snapToggleBtn.classList.toggle('active', snapEnabled);
+  showHint(snapEnabled ? 'Snap enabled' : 'Snap disabled');
+});
 const layerBtn = document.getElementById('layer-btn');
 const layerMenu = document.getElementById('layer-menu');
 const fullscreenBtn = document.getElementById('fullscreen-btn');
@@ -914,35 +942,102 @@ function typeIcon(type) {
   const home = S + '<path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>';
   const bldg = S + '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4M9 6h.01M15 6h.01M9 10h.01M15 10h.01M9 14h.01M15 14h.01"/></svg>';
   const road = S + '<path d="M4 19L12 5l8 14"/><path d="M12 5v14"/></svg>';
-  const cart = S + '<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 002 1.61h9.72a2 2 0 002-1.61L23 6H6"/></svg>';
   const waves = S + '<path d="M2 6c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/><path d="M2 12c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/><path d="M2 18c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/></svg>';
   const mtn = S + '<path d="M8 21l4-10 4 10"/><path d="M2 21h20"/><path d="M15 11l4-8 3 8"/></svg>';
-  const icons = {
-    house: home, city: bldg, town: bldg, village: bldg,
+  // OpenStreetMap Carto symbols (gravitystorm/openstreetmap-carto) — 230 icons
+  // Matches the icons rendered on standard OSM map tiles
+  const img = t => `<img src="icons/${t}.svg" alt="${t}">`;
+  // Map osm_value → icon filename (most are 1:1, aliases handle differences)
+  const iconMap = new Map([
+    // --- Amenity ---
+    'restaurant','cafe','bar','pub','fast_food','ice_cream','nightclub','biergarten',
+    'hospital','pharmacy','doctors','dentist','veterinary',
+    'bank','atm','bureau_de_change',
+    'fuel','parking','parking_garage','taxi','airport','bus_station',
+    'charging_station','car_wash','car_rental','bicycle_rental','bicycle_parking',
+    'motorcycle_parking','ferry',
+    'police','fire_station','post_office','post_box',
+    'cinema','theatre','library','casino','arts_centre','internet_cafe',
+    'prison','town_hall','courthouse','community_centre','social_facility',
+    'place_of_worship',
+    'drinking_water','toilets','recycling','telephone','shelter','fountain',
+    'bench','shower','emergency_phone','bbq','boat_rental',
+    'public_bath','public_bookcase','waste_basket','waste_disposal',
+    'hunting_stand','helipad','parcel_locker','vehicle_inspection',
+    'advertising_column','bicycle_repair_station',
+    // --- Shop ---
+    'supermarket','convenience','bakery','butcher','clothes','shoes',
+    'electronics','furniture','jewelry','hairdresser','beauty',
+    'car_repair','car','car_parts','mobile_phone','optician','florist',
+    'laundry','copyshop','confectionery','alcohol','tea','coffee',
+    'music','musical_instrument','bicycle','gift','paint','garden_centre',
+    'pet','motorcycle','motorcycle_repair','stationery','ticket','photo',
+    'art','bag','bed','beverages','bookmaker','carpet','charity','chemist',
+    'computer','dairy','deli','department_store','diy','fabric',
+    'greengrocer','hearing_aids','hifi','houseware','interior_decoration',
+    'marketplace','massage','medical_supply','newsagent','outdoor',
+    'perfumery','seafood','second_hand','sports','tobacco','toys','trade',
+    'travel_agency','tyres','variety_store','video','video_games',
+    // --- Tourism ---
+    'hotel','guest_house','hostel','motel','apartment','chalet','camp_site',
+    'museum','viewpoint','artwork','picnic_site','alpine_hut','caravan_site',
+    'wilderness_hut','tourism_office','guidepost','audioguide',
+    'information_board','information_terminal','information_map',
+    // --- Historic ---
+    'monument','memorial','castle','archaeological_site','statue',
+    'fort','fortress','manor','palace','city_gate','obelisk','plaque',
+    'shrine','historic_stone','bust',
+    // --- Leisure ---
+    'playground','bowling_alley','fitness_centre','golf_course','golf_pin',
+    'miniature_golf','amusement_arcade','sauna','water_park','fishing',
+    'dance','bird_hide','beach_resort','outdoor_seating','firepit','slipway',
+    // --- Man-made ---
+    'lighthouse','observation_tower','windmill','water_tower','crane',
+    'chimney','communications_tower','cross','generator_wind','mast',
+    'storage_tank','tower','tower_defensive','bunker',
+    'telescope_dome','telescope_dish',
+    // --- Natural ---
+    'peak','cave_entrance','spring','waterfall','saddle',
+    // --- Highway ---
+    'bus_stop','traffic_signals','elevator','ford',
+    // --- Office ---
+    'embassy','consulate',
+    // --- Religion ---
+    'christian','muslim','jewish','buddhist','hindu','shinto','sikh','taoist',
+    // --- Barrier ---
+    'toll_booth','gate','cattle_grid','level_crossing','lift_gate','stile','cycle_barrier',
+  ].map(v => [v, v]));
+  // Aliases: map common osm_value variants → actual icon filename
+  iconMap.set('toilet', 'toilets');
+  iconMap.set('aerodrome', 'airport');
+  iconMap.set('church', 'christian');
+  iconMap.set('mosque', 'muslim');
+  iconMap.set('synagogue', 'jewish');
+  iconMap.set('temple', 'buddhist');
+  iconMap.set('information', 'information_board');
+  iconMap.set('gallery', 'art');
+  iconMap.set('books', 'public_bookcase');
+  iconMap.set('swimming_pool', 'water_park');
+  iconMap.set('sports_centre', 'sports');
+  iconMap.set('kindergarten', 'playground');
+  iconMap.set('guest_house', 'guest_house');
+  iconMap.set('camp_site', 'camp_site');
+  iconMap.set('picnic_site', 'picnic_site');
+  iconMap.set('ruins', 'archaeological_site');
+  iconMap.set('yes', 'place_of_worship'); // generic worship
+
+  // Inline SVG fallbacks for structural/geographic types
+  const fallbacks = {
+    house: home, city: bldg, town: bldg, village: bldg, hamlet: bldg, suburb: bldg, neighbourhood: bldg,
     street: road, highway: road, locality: pin,
-    restaurant: S + '<path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 002-2V2M7 2v20"/><path d="M21 15V2a5 5 0 00-5 5v6c0 1.1.9 2 2 2h3v7"/></svg>',
-    cafe: S + '<path d="M17 8h1a4 4 0 010 8h-1"/><path d="M3 8h14v9a4 4 0 01-4 4H7a4 4 0 01-4-4z"/><line x1="6" y1="2" x2="6" y2="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="14" y1="2" x2="14" y2="4"/></svg>',
-    hotel: S + '<path d="M2 4v16"/><path d="M2 8h18a2 2 0 012 2v10"/><path d="M2 17h20"/><path d="M6 8v9"/></svg>',
-    school: S + '<path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 2 4 3 6 3s6-1 6-3v-5"/></svg>',
-    hospital: S + '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 8v8M8 12h8"/></svg>',
-    pharmacy: S + '<circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>',
-    bank: S + '<path d="M3 22h18"/><path d="M6 18v-7M10 18v-7M14 18v-7M18 18v-7"/><path d="M2 11l10-7 10 7"/></svg>',
-    fuel: S + '<path d="M3 22V5a2 2 0 012-2h8a2 2 0 012 2v17"/><path d="M15 10h2a2 2 0 012 2v2"/><path d="M3 22h12"/><path d="M7 10h4"/></svg>',
-    parking: S + '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 17V7h4a3 3 0 010 6H9"/></svg>',
-    bus_stop: S + '<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 10h18"/><circle cx="7" cy="15" r="1"/><circle cx="17" cy="15" r="1"/><path d="M7 18v2M17 18v2"/></svg>',
-    station: S + '<rect x="4" y="3" width="16" height="14" rx="2"/><path d="M4 10h16"/><circle cx="8" cy="14" r="1" fill="currentColor" stroke="none"/><circle cx="16" cy="14" r="1" fill="currentColor" stroke="none"/><path d="M8 17l-2 4M16 17l2 4M10 17h4"/></svg>',
-    park: S + '<path d="M12 22v-6"/><path d="M9 16h6"/><path d="M5 16l7-12 7 12"/></svg>',
-    monument: S + '<path d="M12 2l-4 6h8l-4-6z"/><rect x="10" y="8" width="4" height="12"/><path d="M6 20h12"/></svg>',
-    church: S + '<path d="M12 2v4M8 6h8"/><path d="M10 6v4a2 2 0 01-2 2H6v8h12v-8h-2a2 2 0 01-2-2V6"/><path d="M6 20h12"/></svg>',
-    mosque: S + '<path d="M12 2c0 4-6 6-6 10v8h12v-8c0-4-6-6-6-10z"/><path d="M6 20h12"/><line x1="12" y1="12" x2="12" y2="16"/></svg>',
-    museum: S + '<path d="M3 22h18"/><path d="M6 18v-7M10 18v-7M14 18v-7M18 18v-7"/><path d="M2 11l10-7 10 7"/></svg>',
-    shop: cart, supermarket: cart,
-    mall: S + '<path d="M6 2L3 8v12a2 2 0 002 2h14a2 2 0 002-2V8l-3-6H6z"/><path d="M3 8h18"/><path d="M16 12a4 4 0 01-8 0"/></svg>',
     river: waves, lake: waves,
-    mountain: mtn, peak: mtn,
+    mountain: mtn,
   };
   if (!type) return pin;
-  return icons[type.toLowerCase()] || pin;
+  const t = type.toLowerCase();
+  const mapped = iconMap.get(t);
+  if (mapped) return img(mapped);
+  return fallbacks[t] || pin;
 }
 
 function maneuverIcon(type, modifier) {
@@ -966,6 +1061,177 @@ function maneuverIcon(type, modifier) {
 // ---------------------------------------------------------------------------
 // Geocoding (Photon)
 // ---------------------------------------------------------------------------
+// Human-readable category from osm_key + osm_value
+function osmCategory(key, value) {
+  if (!key && !value) return '';
+  const k = (key || '').toLowerCase();
+  const v = (value || '').toLowerCase();
+  // Map common osm_key:osm_value pairs to readable labels
+  const map = {
+    // Food & drink
+    'amenity:restaurant': 'Restaurant', 'amenity:cafe': 'Cafe', 'amenity:bar': 'Bar',
+    'amenity:fast_food': 'Fast Food', 'amenity:pub': 'Pub',
+    'amenity:ice_cream': 'Ice Cream', 'amenity:nightclub': 'Nightclub',
+    'amenity:biergarten': 'Beer Garden', 'amenity:bbq': 'BBQ',
+    'shop:bakery': 'Bakery', 'shop:butcher': 'Butcher',
+    'shop:confectionery': 'Confectionery', 'shop:alcohol': 'Liquor Store',
+    'shop:tea': 'Tea House', 'shop:coffee': 'Coffee Shop',
+    'shop:beverages': 'Beverages', 'shop:dairy': 'Dairy',
+    'shop:deli': 'Delicatessen', 'shop:greengrocer': 'Greengrocer',
+    'shop:seafood': 'Seafood Shop',
+    // Shopping
+    'shop:supermarket': 'Supermarket', 'shop:convenience': 'Convenience Store',
+    'shop:clothes': 'Clothing Store', 'shop:shoes': 'Shoe Store',
+    'shop:electronics': 'Electronics', 'shop:hardware': 'Hardware Store',
+    'shop:furniture': 'Furniture Store', 'shop:jewelry': 'Jewelry Store',
+    'shop:mall': 'Shopping Mall', 'shop:mobile_phone': 'Mobile Shop',
+    'shop:optician': 'Optician', 'shop:florist': 'Florist',
+    'shop:gift': 'Gift Shop', 'shop:music': 'Music Shop',
+    'shop:musical_instrument': 'Musical Instruments',
+    'shop:bicycle': 'Bicycle Shop', 'shop:car': 'Car Dealer',
+    'shop:car_parts': 'Car Parts', 'shop:car_repair': 'Car Repair',
+    'shop:paint': 'Paint Store', 'shop:watches': 'Watch Shop',
+    'shop:garden_centre': 'Garden Centre', 'shop:books': 'Bookstore',
+    'shop:pet': 'Pet Store', 'shop:general': 'General Store',
+    'shop:department_store': 'Department Store', 'shop:variety_store': 'Variety Store',
+    'shop:stationery': 'Stationery', 'shop:copyshop': 'Copy Shop',
+    'shop:photo': 'Photo Shop', 'shop:art': 'Art Shop',
+    'shop:bag': 'Bag Shop', 'shop:bed': 'Bed Shop',
+    'shop:bookmaker': 'Bookmaker', 'shop:carpet': 'Carpet Shop',
+    'shop:charity': 'Charity Shop', 'shop:chemist': 'Chemist',
+    'shop:computer': 'Computer Shop', 'shop:diy': 'DIY Store',
+    'shop:fabric': 'Fabric Shop', 'shop:hearing_aids': 'Hearing Aids',
+    'shop:hifi': 'Hi-Fi Shop', 'shop:houseware': 'Houseware',
+    'shop:interior_decoration': 'Interior Decoration',
+    'shop:marketplace': 'Marketplace', 'shop:medical_supply': 'Medical Supply',
+    'shop:newsagent': 'Newsagent', 'shop:outdoor': 'Outdoor Shop',
+    'shop:perfumery': 'Perfumery', 'shop:second_hand': 'Second Hand',
+    'shop:sports': 'Sports Shop', 'shop:tobacco': 'Tobacco Shop',
+    'shop:toys': 'Toy Shop', 'shop:trade': 'Trade Supply',
+    'shop:travel_agency': 'Travel Agency', 'shop:tyres': 'Tyre Shop',
+    'shop:video': 'Video Shop', 'shop:video_games': 'Video Games',
+    'shop:ticket': 'Ticket Shop',
+    // Personal care
+    'shop:hairdresser': 'Hairdresser', 'shop:beauty': 'Beauty Salon',
+    'shop:laundry': 'Laundry', 'shop:massage': 'Massage',
+    // Health
+    'amenity:pharmacy': 'Pharmacy', 'amenity:hospital': 'Hospital',
+    'amenity:clinic': 'Clinic', 'amenity:doctors': 'Doctor',
+    'amenity:dentist': 'Dentist', 'amenity:veterinary': 'Veterinary',
+    // Finance & services
+    'amenity:bank': 'Bank', 'amenity:atm': 'ATM',
+    'amenity:bureau_de_change': 'Currency Exchange',
+    'office:lawyer': 'Lawyer', 'office:estate_agent': 'Real Estate',
+    'office:government': 'Government Office', 'office:company': 'Office',
+    'office:insurance': 'Insurance',
+    // Auto
+    'amenity:fuel': 'Gas Station', 'amenity:parking': 'Parking',
+    'amenity:car_rental': 'Car Rental', 'amenity:car_wash': 'Car Wash',
+    'amenity:charging_station': 'EV Charging',
+    'amenity:vehicle_inspection': 'Vehicle Inspection',
+    'shop:motorcycle': 'Motorcycle Shop', 'shop:motorcycle_repair': 'Motorcycle Repair',
+    // Transport
+    'highway:bus_stop': 'Bus Stop', 'amenity:bus_station': 'Bus Station',
+    'amenity:taxi': 'Taxi', 'aeroway:aerodrome': 'Airport',
+    'amenity:helipad': 'Helipad', 'amenity:ferry_terminal': 'Ferry',
+    'railway:station': 'Train Station', 'railway:halt': 'Train Stop',
+    'railway:tram_stop': 'Tram Stop', 'railway:subway_entrance': 'Metro',
+    'amenity:bicycle_rental': 'Bike Rental', 'amenity:bicycle_parking': 'Bike Parking',
+    'amenity:motorcycle_parking': 'Motorcycle Parking',
+    'amenity:boat_rental': 'Boat Rental',
+    // Education
+    'amenity:school': 'School', 'amenity:kindergarten': 'Kindergarten',
+    'amenity:university': 'University', 'amenity:college': 'College',
+    'amenity:library': 'Library',
+    // Accommodation
+    'tourism:hotel': 'Hotel', 'tourism:guest_house': 'Guest House',
+    'tourism:hostel': 'Hostel', 'tourism:motel': 'Motel',
+    'tourism:camp_site': 'Campsite', 'tourism:caravan_site': 'Caravan Site',
+    'tourism:chalet': 'Chalet', 'tourism:apartment': 'Apartment',
+    'tourism:alpine_hut': 'Alpine Hut', 'tourism:wilderness_hut': 'Wilderness Hut',
+    // Religion
+    'amenity:place_of_worship': 'Place of Worship',
+    'building:church': 'Church', 'building:mosque': 'Mosque',
+    'building:synagogue': 'Synagogue', 'building:temple': 'Temple',
+    // Tourism & culture
+    'tourism:museum': 'Museum', 'tourism:attraction': 'Attraction',
+    'tourism:viewpoint': 'Viewpoint', 'tourism:gallery': 'Gallery',
+    'tourism:information': 'Tourist Info', 'tourism:artwork': 'Artwork',
+    'tourism:picnic_site': 'Picnic Site',
+    'amenity:theatre': 'Theatre', 'amenity:cinema': 'Cinema',
+    'amenity:arts_centre': 'Arts Centre', 'amenity:internet_cafe': 'Internet Cafe',
+    'amenity:public_bookcase': 'Public Bookcase',
+    // Historic
+    'historic:monument': 'Monument', 'historic:memorial': 'Memorial',
+    'historic:castle': 'Castle', 'historic:ruins': 'Ruins',
+    'historic:archaeological_site': 'Archaeological Site',
+    'historic:fort': 'Fort', 'historic:fortress': 'Fortress',
+    'historic:manor': 'Manor', 'historic:palace': 'Palace',
+    'historic:city_gate': 'City Gate', 'historic:obelisk': 'Obelisk',
+    'historic:plaque': 'Plaque', 'historic:shrine': 'Shrine',
+    'historic:statue': 'Statue', 'historic:bust': 'Bust',
+    // Leisure & sport
+    'leisure:park': 'Park', 'leisure:garden': 'Garden',
+    'leisure:playground': 'Playground', 'leisure:sports_centre': 'Sports Center',
+    'leisure:swimming_pool': 'Swimming Pool', 'leisure:fitness_centre': 'Fitness Center',
+    'leisure:stadium': 'Stadium', 'leisure:dog_park': 'Dog Park',
+    'leisure:golf_course': 'Golf Course', 'leisure:miniature_golf': 'Mini Golf',
+    'leisure:bowling_alley': 'Bowling', 'leisure:amusement_arcade': 'Arcade',
+    'leisure:water_park': 'Water Park', 'leisure:beach_resort': 'Beach Resort',
+    'leisure:fishing': 'Fishing', 'leisure:dance': 'Dance',
+    'leisure:sauna': 'Sauna', 'leisure:bird_hide': 'Bird Hide',
+    'leisure:slipway': 'Slipway',
+    'amenity:casino': 'Casino',
+    // Public services
+    'amenity:post_office': 'Post Office', 'amenity:post_box': 'Post Box',
+    'amenity:police': 'Police', 'amenity:fire_station': 'Fire Station',
+    'amenity:community_centre': 'Community Center',
+    'office:embassy': 'Embassy', 'office:consulate': 'Consulate',
+    'amenity:prison': 'Prison',
+    'amenity:townhall': 'Town Hall', 'amenity:courthouse': 'Courthouse',
+    'amenity:social_facility': 'Social Facility',
+    'amenity:hunting_stand': 'Hunting Stand',
+    // Utilities & infrastructure
+    'amenity:drinking_water': 'Drinking Water', 'amenity:toilets': 'Toilets',
+    'amenity:recycling': 'Recycling', 'amenity:telephone': 'Telephone',
+    'amenity:shelter': 'Shelter', 'amenity:fountain': 'Fountain',
+    'amenity:bench': 'Bench', 'amenity:shower': 'Shower',
+    'amenity:waste_basket': 'Waste Basket', 'amenity:waste_disposal': 'Waste Disposal',
+    'amenity:parcel_locker': 'Parcel Locker', 'amenity:public_bath': 'Public Bath',
+    'amenity:bicycle_repair_station': 'Bike Repair Station',
+    'amenity:vending_machine': 'Vending Machine',
+    // Man-made
+    'man_made:lighthouse': 'Lighthouse', 'man_made:windmill': 'Windmill',
+    'man_made:water_tower': 'Water Tower', 'man_made:tower': 'Tower',
+    'man_made:observation_tower': 'Observation Tower',
+    'man_made:communications_tower': 'Communications Tower',
+    'man_made:chimney': 'Chimney', 'man_made:crane': 'Crane',
+    'man_made:cross': 'Cross', 'man_made:storage_tank': 'Storage Tank',
+    'man_made:bunker_silo': 'Bunker',
+    'military:bunker': 'Bunker',
+    // Nature & geography
+    'natural:peak': 'Peak', 'natural:saddle': 'Saddle',
+    'natural:water': 'Water Body', 'natural:spring': 'Spring',
+    'natural:cave_entrance': 'Cave', 'natural:waterfall': 'Waterfall',
+    'natural:volcano': 'Volcano',
+    'landuse:cemetery': 'Cemetery',
+    // Barrier
+    'barrier:toll_booth': 'Toll Booth', 'barrier:gate': 'Gate',
+    'barrier:cattle_grid': 'Cattle Grid', 'barrier:lift_gate': 'Lift Gate',
+    'barrier:level_crossing': 'Level Crossing',
+    // Places
+    'place:city': 'City', 'place:town': 'Town', 'place:village': 'Village',
+    'place:hamlet': 'Hamlet', 'place:suburb': 'Suburb',
+    'place:neighbourhood': 'Neighbourhood',
+  };
+  const exact = map[`${k}:${v}`];
+  if (exact) return exact;
+  // Fallback: capitalize osm_value, or osm_key
+  if (v && v !== 'yes') return v.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  if (k) return k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return '';
+}
+
 function formatPhotonResult(feature) {
   const props = feature.properties || {};
   const coords = feature.geometry?.coordinates || [0, 0];
@@ -974,19 +1240,30 @@ function formatPhotonResult(feature) {
     name = props.housenumber ? `${props.street} ${props.housenumber}` : props.street;
   }
   if (!name) name = props.locality || props.city || 'Unknown';
+
+  // Build address detail line
   const detail = [];
   if (props.street && name !== props.street) {
     detail.push(props.housenumber ? `${props.street} ${props.housenumber}` : props.street);
   }
+  if (props.district) detail.push(props.district);
   if (props.locality) detail.push(props.locality);
-  if (props.city && props.city !== props.locality) detail.push(props.city);
-  if (props.state) detail.push(props.state);
+  if (props.city && props.city !== props.locality && props.city !== props.district) detail.push(props.city);
+  if (props.county && props.county !== props.city) detail.push(props.county);
+  if (props.state && props.state !== props.city && props.state !== props.county) detail.push(props.state);
   if (props.postcode) detail.push(props.postcode);
   if (props.country) detail.push(props.country);
+
+  // Category from osm_key + osm_value
+  const category = osmCategory(props.osm_key, props.osm_value);
+
   return {
     name,
     detail: detail.join(', '),
-    type: props.type || props.osm_value || '',
+    type: props.osm_value || props.type || '',
+    category,
+    osm_key: props.osm_key || '',
+    osm_value: props.osm_value || '',
     lat: coords[1],
     lng: coords[0]
   };
@@ -994,14 +1271,14 @@ function formatPhotonResult(feature) {
 
 let _geocodeAbort = null;
 async function geocode(query, {signal} = {}) {
-  const res = await fetch(`${BASE}/photon/api?q=${encodeURIComponent(query)}&limit=5`, {signal});
+  const res = await fetch(`${BASE}/photon/api?q=${encodeURIComponent(query)}&limit=10`, {signal});
   if (!res.ok) throw new Error(`Photon ${res.status}`);
   const data = await res.json();
   return data.features || [];
 }
 
-async function reverseGeocode(lng, lat) {
-  const res = await fetch(`${BASE}/photon/reverse?lon=${lng}&lat=${lat}`);
+async function reverseGeocode(lng, lat, radius = 0.005) {
+  const res = await fetch(`${BASE}/photon/reverse?lon=${lng}&lat=${lat}&radius=${radius}&limit=1`);
   if (!res.ok) throw new Error(`Photon reverse ${res.status}`);
   const data = await res.json();
   return data.features?.[0] || null;
@@ -1062,12 +1339,15 @@ searchInput.addEventListener('input', () => {
 function renderSearchResults(results, container, onSelect) {
   container.innerHTML = results.map((r, i) => {
     const info = formatPhotonResult(r);
+    // Use osm_value for icon matching (more specific), fallback to type
+    const iconType = info.osm_value || info.type;
+    const badge = info.category || info.type;
     return `<div class="search-item${i === highlightedIdx ? ' highlighted' : ''}" data-idx="${i}">
-      <div class="search-item-icon">${typeIcon(info.type)}</div>
+      <div class="search-item-icon">${typeIcon(iconType)}</div>
       <div class="search-item-body">
         <div class="search-item-name">${esc(info.name)}</div>
         <div class="search-item-detail">${esc(info.detail)}</div>
-        ${info.type ? `<span class="search-item-type">${esc(info.type)}</span>` : ''}
+        ${badge ? `<span class="search-item-type">${esc(badge)}</span>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -1093,7 +1373,16 @@ function selectSearchResult(results, idx) {
 
 function popupHtml(info) {
   const coords = `${info.lat.toFixed(5)}, ${info.lng.toFixed(5)}`;
-  return `<div class="popup-title">${esc(info.name)}</div>
+  const iconType = info.osm_value || info.type;
+  const icon = typeIcon(iconType);
+  const catLine = info.category ? `<div class="popup-category">${esc(info.category)}</div>` : '';
+  return `<div class="popup-header">
+      <div class="popup-icon">${icon}</div>
+      <div>
+        <div class="popup-title">${esc(info.name)}</div>
+        ${catLine}
+      </div>
+    </div>
     <div class="popup-detail">${esc(info.detail)}</div>
     <div class="popup-coords-row">
       <span class="popup-coords">${coords}</span>
@@ -1455,6 +1744,8 @@ async function snapReverseGeocode(clickLng, clickLat) {
     name: best.info.name,
     detail: best.info.detail,
     type: best.info.type,
+    osm_value: best.info.osm_value || '',
+    category: best.info.category || '',
     roads,
     isCrossroad: best.cat === 'crossroad',
     distanceFromClick: best.dist,
@@ -1469,23 +1760,28 @@ function snapPopupHtml(snap) {
   const parts = [];
   const color = snapCategoryColor(snap.cat);
 
-  // Category label
-  parts.push(`<div class="popup-snap-label" style="color:${color}">
-    ${snapCategoryIcon(snap.cat)}
-    ${esc(snapCategoryLabel(snap.cat))}
-  </div>`);
+  // Icon: prefer specific OSM Carto icon, fallback to snap category icon
+  const iconType = snap.osm_value || snap.type;
+  const specificIcon = typeIcon(iconType);
+  const isGenericPin = specificIcon.includes('<circle cx="12" cy="10" r="3"/>');
+  const icon = (!isGenericPin) ? specificIcon : snapCategoryIcon(snap.cat);
 
-  // Main title
-  parts.push(`<div class="popup-title">${esc(snap.name)}</div>`);
+  // Category badge
+  const catBadge = snap.category ? `<div class="popup-category">${esc(snap.category)}</div>` : '';
+
+  // Header with icon + title + badge
+  parts.push(`<div class="popup-header">
+    <div class="popup-icon">${icon}</div>
+    <div>
+      <div class="popup-snap-label" style="color:${color}">${esc(snapCategoryLabel(snap.cat))}</div>
+      <div class="popup-title">${esc(snap.name)}</div>
+      ${catBadge}
+    </div>
+  </div>`);
 
   // Detail / address
   if (snap.detail) {
     parts.push(`<div class="popup-detail">${esc(snap.detail)}</div>`);
-  }
-
-  // Type badge (if meaningful)
-  if (snap.type && snap.type !== 'road' && snap.type !== 'crossroad') {
-    parts.push(`<div style="margin-top:3px"><span class="search-item-type">${esc(snap.type)}</span></div>`);
   }
 
   // Nearby roads context (when snapped to a non-road object)
@@ -1537,69 +1833,99 @@ map.on('contextmenu', async (e) => {
   if (reversePopup) reversePopup.remove();
   clearSnapVisuals();
 
-  // Show loading popup at click point
-  reversePopup = new maplibregl.Popup({ closeOnClick: true, offset: [0, -10] })
-    .setLngLat([clickLng, clickLat])
-    .setHTML('<div class="popup-detail" style="text-align:center">Snapping to nearest object...</div>')
-    .addTo(map);
-
-  reversePopup.on('close', clearSnapVisuals);
-
-  try {
-    const snap = await snapReverseGeocode(clickLng, clickLat);
-
-    // Move popup to snapped location
-    reversePopup.setLngLat([snap.snapLng, snap.snapLat]);
-    reversePopup.setHTML(snapPopupHtml(snap));
-
-    // Draw snap marker at the exact snapped point
-    const snapEl = document.createElement('div');
-    snapEl.className = 'snap-marker';
-    snapMarker = new maplibregl.Marker({ element: snapEl })
-      .setLngLat([snap.snapLng, snap.snapLat])
+  if (snapEnabled) {
+    // --- Snap mode: find nearest object and snap to it ---
+    reversePopup = new maplibregl.Popup({ closeOnClick: true, offset: [0, -10] })
+      .setLngLat([clickLng, clickLat])
+      .setHTML('<div class="popup-detail" style="text-align:center">Snapping to nearest object...</div>')
       .addTo(map);
 
-    // If snapped away from click point, show the offset visually
-    if (snap.distanceFromClick > 3) {
-      // Small dot at original click point
-      const clickEl = document.createElement('div');
-      clickEl.className = 'snap-click-marker';
-      clickMarker = new maplibregl.Marker({ element: clickEl })
-        .setLngLat([clickLng, clickLat])
+    reversePopup.on('close', clearSnapVisuals);
+
+    try {
+      const snap = await snapReverseGeocode(clickLng, clickLat);
+
+      // Move popup to snapped location
+      reversePopup.setLngLat([snap.snapLng, snap.snapLat]);
+      reversePopup.setHTML(snapPopupHtml(snap));
+
+      // Draw snap marker at the exact snapped point
+      const snapEl = document.createElement('div');
+      snapEl.className = 'snap-marker';
+      snapMarker = new maplibregl.Marker({ element: snapEl })
+        .setLngLat([snap.snapLng, snap.snapLat])
         .addTo(map);
 
-      // Dashed line from click to snap
-      map.addSource('snap-line', {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          geometry: {
-            type: 'LineString',
-            coordinates: [[clickLng, clickLat], [snap.snapLng, snap.snapLat]]
+      // If snapped away from click point, show the offset visually
+      if (snap.distanceFromClick > 3) {
+        const clickEl = document.createElement('div');
+        clickEl.className = 'snap-click-marker';
+        clickMarker = new maplibregl.Marker({ element: clickEl })
+          .setLngLat([clickLng, clickLat])
+          .addTo(map);
+
+        map.addSource('snap-line', {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: [[clickLng, clickLat], [snap.snapLng, snap.snapLat]]
+            }
           }
-        }
-      });
-      map.addLayer({
-        id: 'snap-line-layer',
-        type: 'line',
-        source: 'snap-line',
-        paint: {
-          'line-color': '#6366f1',
-          'line-width': 2,
-          'line-dasharray': [3, 3],
-          'line-opacity': 0.6
-        }
-      });
+        });
+        map.addLayer({
+          id: 'snap-line-layer',
+          type: 'line',
+          source: 'snap-line',
+          paint: {
+            'line-color': '#6366f1',
+            'line-width': 2,
+            'line-dasharray': [3, 3],
+            'line-opacity': 0.6
+          }
+        });
+      }
+
+    } catch (err) {
+      console.error('Snap reverse geocode error:', err);
+      const coords = `${clickLat.toFixed(5)}, ${clickLng.toFixed(5)}`;
+      reversePopup.setHTML(
+        `<div class="popup-detail" style="color:var(--red)">Reverse geocode failed</div>
+         <div class="popup-coords-row"><span class="popup-coords">${coords}</span>
+         <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button></div>`
+      );
     }
 
-  } catch (err) {
-    console.error('Snap reverse geocode error:', err);
-    const coords = `${clickLat.toFixed(5)}, ${clickLng.toFixed(5)}`;
-    reversePopup.setHTML(
-      `<div class="popup-detail" style="color:var(--red)">Reverse geocode failed</div>
-       <div class="popup-coords-row"><span class="popup-coords">${coords}</span>
-       <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button></div>`
-    );
+  } else {
+    // --- Simple mode: plain reverse geocode at click point ---
+    reversePopup = new maplibregl.Popup({ closeOnClick: true, offset: [0, -10] })
+      .setLngLat([clickLng, clickLat])
+      .setHTML('<div class="popup-detail" style="text-align:center">Looking up location...</div>')
+      .addTo(map);
+
+    try {
+      const f = await reverseGeocode(clickLng, clickLat);
+      if (f) {
+        const info = formatPhotonResult(f);
+        reversePopup.setHTML(popupHtml(info));
+      } else {
+        const coords = `${clickLat.toFixed(5)}, ${clickLng.toFixed(5)}`;
+        reversePopup.setHTML(
+          `<div class="popup-title">Unknown location</div>
+           <div class="popup-coords-row"><span class="popup-coords">${coords}</span>
+           <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button></div>`
+        );
+      }
+    } catch (err) {
+      console.error('Reverse geocode error:', err);
+      const coords = `${clickLat.toFixed(5)}, ${clickLng.toFixed(5)}`;
+      reversePopup.setHTML(
+        `<div class="popup-detail" style="color:var(--red)">Reverse geocode failed</div>
+         <div class="popup-coords-row"><span class="popup-coords">${coords}</span>
+         <button class="popup-copy-btn" onclick="navigator.clipboard.writeText('${coords}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1000)">Copy</button></div>`
+      );
+    }
   }
 });
 
@@ -1924,6 +2250,9 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'f' || e.key === 'F') {
     e.preventDefault();
     fullscreenBtn.click();
+  } else if (e.key === 's' || e.key === 'S') {
+    e.preventDefault();
+    snapToggleBtn.click();
   }
 });
 
