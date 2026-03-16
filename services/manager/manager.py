@@ -772,6 +772,8 @@ class ManagerHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             last_data = None
+            heartbeat_interval = 15  # seconds between heartbeats
+            last_heartbeat = time.monotonic()
             deadline = time.monotonic() + SSE_TIMEOUT_SECONDS
             try:
                 while time.monotonic() < deadline:
@@ -781,6 +783,11 @@ class ManagerHandler(BaseHTTPRequestHandler):
                         self.wfile.write(f"data: {data_str}\n\n".encode())
                         self.wfile.flush()
                         last_data = data_str
+                        last_heartbeat = time.monotonic()
+                    elif time.monotonic() - last_heartbeat >= heartbeat_interval:
+                        self.wfile.write(b":heartbeat\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = time.monotonic()
                     time.sleep(2)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass

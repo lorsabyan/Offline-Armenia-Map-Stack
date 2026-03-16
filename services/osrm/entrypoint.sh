@@ -195,6 +195,8 @@ stop_server() {
 
 schedule_updates() {
   (
+    # Forward SIGTERM to all children so curl/osrm-extract are cleaned up
+    trap 'kill 0; exit 0' SIGTERM SIGINT
     write_status "idle" "Waiting for next update cycle"
 
     while true; do
@@ -280,7 +282,7 @@ while true; do
     sleep "$backoff"
     start_server
     # Wait 60s stability window before resetting crash counter
-    local stable=true
+    stable=true
     for i in $(seq 1 12); do
       sleep 5
       if ! kill -0 "$SERVER_PID" 2>/dev/null; then

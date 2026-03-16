@@ -45,6 +45,7 @@ services:
       - tiles-data:/data
     networks:
       - map-internal
+      - map-egress
     deploy:
       resources:
         limits:
@@ -76,6 +77,7 @@ services:
       - nominatim-data:/var/lib/postgresql/14/main
     networks:
       - map-internal
+      - map-egress
     deploy:
       resources:
         limits:
@@ -89,7 +91,7 @@ services:
         max-size: "50m"
         max-file: "5"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/search?q=test&format=jsonv2"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/status?format=json"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -205,6 +207,7 @@ services:
       - update-triggers:/triggers
     networks:
       - map-internal
+      - map-egress
     shm_size: '2g'
     deploy:
       resources:
@@ -305,6 +308,12 @@ services:
 
 networks:
   map-internal:
+    # Internal-only network: no outbound internet access.
+    # Used for inter-service communication (nginx↔backends, manager↔nominatim).
+    internal: true
+    driver: bridge
+  map-egress:
+    # Network with outbound internet access for services that download data.
     driver: bridge
 
 volumes:

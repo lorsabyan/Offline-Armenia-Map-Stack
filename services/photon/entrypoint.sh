@@ -6,6 +6,12 @@ NOMINATIM_PORT=${NOMINATIM_PORT:-5432}
 NOMINATIM_DB=${NOMINATIM_DB:-nominatim}
 NOMINATIM_USER=${NOMINATIM_USER:-nominatim}
 NOMINATIM_PASSWORD=${NOMINATIM_PASSWORD:-nominatim}
+# Warn if the password is a known insecure default
+case "$NOMINATIM_PASSWORD" in
+  nominatim|CHANGE_ME_BEFORE_FIRST_DEPLOY|"")
+    echo "[photon-${PHOTON_INSTANCE:-?}] WARNING: NOMINATIM_PASSWORD is set to a default/placeholder value — change it for production!" >&2
+    ;;
+esac
 PHOTON_LANGUAGES=${PHOTON_LANGUAGES:-en,hy,ru}
 PHOTON_COUNTRY_CODES=${PHOTON_COUNTRY_CODES:-am}
 PHOTON_DATA_DIR=${PHOTON_DATA_DIR:-/photon/photon_data}
@@ -18,6 +24,8 @@ PHOTON_SERVE_HEAP=${PHOTON_SERVE_HEAP:-512m}
 SERVER_PID=""
 IMPORT_PID=""
 UPDATE_IN_PROGRESS="${PHOTON_DATA_DIR}/.update-in-progress"
+CRASH_COUNT=0
+MAX_CRASH_RESTARTS=5
 
 mkdir -p "$TRIGGER_DIR"
 
@@ -188,14 +196,21 @@ fi
 while true; do
   sleep "$POLL_INTERVAL"
 
-  # Verify server is still alive
+  # Verify server is still alive (with crash counter and circuit breaker)
   if [ -n "${SERVER_PID:-}" ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    log "ERROR: Photon server process died, restarting"
-    write_status "error" "Server process died, restarting"
+    CRASH_COUNT=$((CRASH_COUNT + 1))
+    if [ "$CRASH_COUNT" -gt "$MAX_CRASH_RESTARTS" ]; then
+      log "CRITICAL: Photon server crashed $CRASH_COUNT times, giving up (container will restart)"
+      write_status "error" "Server crashed repeatedly, restarting container"
+      exit 1
+    fi
+    log "ERROR: Photon server process died (attempt ${CRASH_COUNT}/${MAX_CRASH_RESTARTS}), restarting"
+    write_status "error" "Server process died, restarting (attempt ${CRASH_COUNT})"
     stop_server  # Reap zombie if any
     start_server
     if wait_for_server 30; then
       write_status "idle" "Server restarted after crash"
+      CRASH_COUNT=0
     else
       write_status "error" "Server failed to restart"
     fi
