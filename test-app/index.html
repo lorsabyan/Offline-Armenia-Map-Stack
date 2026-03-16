@@ -436,16 +436,18 @@
   }
   .help-got-it:hover { background: #1d4ed8; }
 
-  /* ---------- Update panel ---------- */
+  /* ---------- Status panel ---------- */
   #update-panel {
     position: absolute; top: 12px; right: 56px; z-index: 12;
     background: var(--bg); border-radius: var(--radius); box-shadow: var(--shadow-lg);
-    width: 300px; display: none;
+    width: 340px; display: none; max-height: calc(100vh - 80px); overflow-y: auto;
   }
   #update-panel.visible { display: block; }
   #update-panel-header {
     padding: 14px 16px; border-bottom: 1px solid var(--border);
     display: flex; justify-content: space-between; align-items: center;
+    position: sticky; top: 0; background: var(--bg); z-index: 1;
+    border-radius: var(--radius) var(--radius) 0 0;
   }
   #update-panel-header h3 {
     font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px;
@@ -478,14 +480,11 @@
   .update-svc-msg {
     color: var(--text-secondary); margin-bottom: 4px; line-height: 1.4;
   }
-  .update-svc-time { color: var(--text-muted); font-size: 10px; }
-  .update-svc-btn {
-    margin-top: 6px; padding: 5px 12px; border: 1px solid var(--border);
-    border-radius: var(--radius-sm); background: var(--bg); cursor: pointer;
-    font-size: 11px; font-weight: 600; color: var(--text-secondary); transition: all .15s;
-  }
-  .update-svc-btn:hover { background: var(--bg-hover); border-color: var(--text-muted); }
-  .update-svc-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .update-svc-time { color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+  .update-svc-time .time-label { color: var(--text-muted); }
+  .update-svc-time .time-value { color: var(--text-secondary); }
+  .update-svc-time .time-error { color: var(--red); }
+  .update-svc-time .time-next { color: var(--blue); }
   .update-progress-bar {
     height: 3px; background: var(--border); border-radius: 2px;
     overflow: hidden; margin-top: 6px;
@@ -498,16 +497,38 @@
     0% { transform: translateX(-100%); }
     100% { transform: translateX(350%); }
   }
-  #update-all-row {
-    padding: 12px 16px; border-top: 1px solid var(--border);
+  .update-instances {
+    display: flex; gap: 8px; margin-top: 4px;
   }
-  #update-all-btn {
-    width: 100%; padding: 8px 0; border: none; border-radius: var(--radius-sm);
-    background: var(--blue); color: #fff; cursor: pointer; font-size: 12px;
-    font-weight: 600; transition: background .15s;
+  .update-instance {
+    display: flex; align-items: center; gap: 4px; font-size: 10px;
+    color: var(--text-muted); padding: 2px 6px;
+    background: var(--bg-hover); border-radius: 4px;
   }
-  #update-all-btn:hover { background: #1d4ed8; }
-  #update-all-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .update-instance .inst-dot {
+    width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  }
+  .inst-dot.idle { background: var(--green); }
+  .inst-dot.updating { background: #d97706; }
+  .inst-dot.error { background: var(--red); }
+  .update-monitor {
+    padding: 10px 16px; border-top: 1px solid var(--border);
+    font-size: 10px; color: var(--text-muted); line-height: 1.6;
+    background: #f8fafc;
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+  .update-monitor-title {
+    font-weight: 600; font-size: 11px; color: var(--text-secondary);
+    margin-bottom: 2px; display: flex; align-items: center; gap: 5px;
+  }
+  .monitor-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+    display: inline-block; animation: monitor-pulse 2s ease-in-out infinite;
+  }
+  @keyframes monitor-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .4; }
+  }
 
   /* ---------- Mobile responsive ---------- */
   @media (max-width: 480px) {
@@ -595,7 +616,7 @@
   <button class="map-ctrl-btn" id="help-btn" title="Help &amp; keyboard shortcuts">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
   </button>
-  <button class="map-ctrl-btn" id="update-btn" title="Map data updates">
+  <button class="map-ctrl-btn" id="update-btn" title="Service status">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>
   </button>
 </div>
@@ -604,14 +625,12 @@
   <div id="update-panel-header">
     <h3>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>
-      Data Updates
+      Service Status
     </h3>
     <button class="update-panel-close" id="update-panel-close">&times;</button>
   </div>
   <div id="update-services"></div>
-  <div id="update-all-row">
-    <button id="update-all-btn">Update All</button>
-  </div>
+  <div id="update-monitor"></div>
 </div>
 
 <div id="route-panel">
@@ -2257,14 +2276,60 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------------
-// Data Update Panel
+// Service Status Panel (read-only monitor)
 // ---------------------------------------------------------------------------
 const updateBtn = document.getElementById('update-btn');
 const updatePanel = document.getElementById('update-panel');
 const updatePanelClose = document.getElementById('update-panel-close');
 const updateServicesEl = document.getElementById('update-services');
-const updateAllBtn = document.getElementById('update-all-btn');
+const updateMonitorEl = document.getElementById('update-monitor');
 let updateEventSource = null;
+
+/** Format a duration in seconds to a human-readable relative string. */
+function formatRelativeTime(isoStr) {
+  if (!isoStr) return null;
+  const d = new Date(isoStr);
+  if (isNaN(d.getTime())) return null;
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return 'just now';
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  if (hr < 24) return remMin > 0 ? `${hr}h ${remMin}m ago` : `${hr}h ago`;
+  const days = Math.floor(hr / 24);
+  return `${days}d ago`;
+}
+
+/** Format a future duration in seconds to countdown string. */
+function formatCountdown(seconds) {
+  if (seconds <= 0) return 'soon';
+  if (seconds < 60) return `~${Math.ceil(seconds)}s`;
+  const min = Math.floor(seconds / 60);
+  if (min < 60) return `~${min}m`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return remMin > 0 ? `~${hr}h ${remMin}m` : `~${hr}h`;
+}
+
+/** Compute estimated next auto-update from nominatim monitor data. */
+function getNextAutoUpdate(data, serviceKey) {
+  const monitor = data.nominatim?.data_change_monitor;
+  if (!monitor?.enabled) return null;
+  const autoTrigger = monitor.auto_triggers?.[serviceKey];
+  if (!autoTrigger) return null;
+  const lastTrigger = autoTrigger.last_auto_trigger;
+  const cooldown = autoTrigger.cooldown_s;
+  if (!lastTrigger || !cooldown) return null;
+  const lastTriggerTime = new Date(lastTrigger).getTime();
+  if (isNaN(lastTriggerTime)) return null;
+  const nextTime = lastTriggerTime + cooldown * 1000;
+  const remaining = (nextTime - Date.now()) / 1000;
+  if (remaining <= 0) return { text: 'On next data change', remaining: 0 };
+  return { text: `in ${formatCountdown(remaining)}`, remaining };
+}
 
 updateBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -2297,31 +2362,76 @@ async function fetchUpdateStatus() {
     const res = await fetch(`${BASE}/manager/status`);
     if (!res.ok) throw new Error();
     const data = await res.json();
-    renderUpdatePanel(data);
+    renderStatusPanel(data);
   } catch {
     updateServicesEl.innerHTML =
       '<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:12px">Manager service unavailable</div>';
+    updateMonitorEl.innerHTML = '';
   }
 }
 
-function renderUpdatePanel(data) {
+function renderStatusPanel(data) {
   const services = [
-    { key: 'osrm', label: 'OSRM Routing', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l4-4 4 4"/><path d="M7 5v14"/><path d="M21 15l-4 4-4-4"/><path d="M17 19V5"/></svg>' },
-    { key: 'photon', label: 'Photon Geocoding', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' },
-    { key: 'tile_server', label: 'Tile Server', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>' },
-    { key: 'nominatim', label: 'Nominatim', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>' },
+    { key: 'osrm', label: 'OSRM Routing' },
+    { key: 'photon', label: 'Photon Geocoding' },
+    { key: 'tile_server', label: 'Tile Server' },
+    { key: 'nominatim', label: 'Nominatim' },
   ];
 
   updateServicesEl.innerHTML = services.map(svc => {
     const s = data[svc.key] || {};
     const state = s.state || 'idle';
     const isAuto = state === 'auto';
+    const isError = state === 'error';
     const isUpdating = state === 'updating' || s.trigger_pending;
     const badgeLabel = s.trigger_pending ? 'queued' : state;
     const badgeClass = s.trigger_pending ? 'queued' : state;
-    const lastUpdate = s.last_update
-      ? new Date(s.last_update).toLocaleString()
-      : 'Never';
+
+    // Timestamps
+    const relTime = formatRelativeTime(s.last_update);
+    const absTime = s.last_update ? new Date(s.last_update).toLocaleString() : '';
+
+    // Next auto-update estimate (only for osrm and photon)
+    const nextUpdate = (svc.key === 'osrm' || svc.key === 'photon')
+      ? getNextAutoUpdate(data, svc.key) : null;
+
+    // Photon blue-green instance detail
+    let instancesHtml = '';
+    if (svc.key === 'photon' && s.instances) {
+      instancesHtml = '<div class="update-instances">' +
+        Object.entries(s.instances).map(([name, inst]) =>
+          `<div class="update-instance"><span class="inst-dot ${esc(inst.state || 'idle')}"></span>${esc(name)}: ${esc(inst.state || 'idle')}</div>`
+        ).join('') + '</div>';
+    }
+
+    // Build time info lines
+    let timeHtml = '';
+    if (!isAuto) {
+      if (isError && relTime) {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Last failure:</span> <span class="time-error" title="${esc(absTime)}">${esc(relTime)}</span></div>`;
+      } else if (relTime) {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value" title="${esc(absTime)}">${esc(relTime)}</span></div>`;
+      } else {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value">Never</span></div>`;
+      }
+      if (nextUpdate && !isUpdating) {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Next update:</span> <span class="time-next">${esc(nextUpdate.text)}</span></div>`;
+      }
+    } else {
+      // Auto services — show update mode
+      if (svc.key === 'tile_server') {
+        timeHtml = '<div class="update-svc-time"><span class="time-label">Updates:</span> <span class="time-value">Continuous (minutely diffs)</span></div>';
+      } else if (svc.key === 'nominatim') {
+        const monitor = s.data_change_monitor;
+        const lastData = monitor?.last_data_updated;
+        const dataRel = formatRelativeTime(lastData);
+        const dataAbs = lastData ? new Date(lastData).toLocaleString() : '';
+        timeHtml = `<div class="update-svc-time"><span class="time-label">Updates:</span> <span class="time-value">Geofabrik replication</span></div>`;
+        if (dataRel) {
+          timeHtml += `<div class="update-svc-time"><span class="time-label">Last data change:</span> <span class="time-value" title="${esc(dataAbs)}">${esc(dataRel)}</span></div>`;
+        }
+      }
+    }
 
     return `<div class="update-service">
       <div class="update-svc-header">
@@ -2329,51 +2439,31 @@ function renderUpdatePanel(data) {
         <span class="update-svc-badge ${badgeClass}">${esc(badgeLabel)}</span>
       </div>
       <div class="update-svc-msg">${esc(s.message || '')}</div>
-      ${!isAuto ? `<div class="update-svc-time">Last updated: ${lastUpdate}</div>` : ''}
+      ${timeHtml}
+      ${instancesHtml}
       ${isUpdating ? '<div class="update-progress-bar"><div class="update-progress-fill"></div></div>' : ''}
-      ${!isAuto && !isUpdating ? `<button class="update-svc-btn" onclick="triggerUpdate('${svc.key}')">Update now</button>` : ''}
     </div>`;
   }).join('');
 
-  const anyUpdating = ['osrm', 'photon'].some(k =>
-    data[k]?.state === 'updating' || data[k]?.trigger_pending
-  );
-  updateAllBtn.disabled = anyUpdating;
-}
-
-async function triggerUpdate(service) {
-  try {
-    const services = service === 'all' ? ['osrm', 'photon'] : [service];
-    const headers = { 'Content-Type': 'application/json' };
-    // Support UPDATE_TOKEN auth via localStorage only (not URL params — those leak via Referer headers)
-    const token = localStorage.getItem('UPDATE_TOKEN');
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    const res = await fetch(`${BASE}/manager/update`, {
-      method: 'POST', headers,
-      body: JSON.stringify({ services, source: 'web' })
-    });
-    const data = await res.json();
-    if (res.status === 401) {
-      showToast('Unauthorized — set UPDATE_TOKEN in localStorage');
-    } else if (data.triggered?.length) {
-      showToast(`Update triggered for ${data.triggered.join(', ')}`);
-    } else if (data.skipped?.length) {
-      showToast('Update already in progress');
-    }
-    fetchUpdateStatus();
-  } catch {
-    showToast('Failed to trigger update');
+  // Data-change monitor footer
+  const monitor = data.nominatim?.data_change_monitor;
+  if (monitor?.enabled) {
+    const pollMin = Math.round((monitor.poll_interval_s || 300) / 60);
+    updateMonitorEl.innerHTML = `<div class="update-monitor">
+      <div class="update-monitor-title"><span class="monitor-dot"></span> Auto-update monitor active</div>
+      <div>Polling Nominatim every ${pollMin}m for data changes</div>
+    </div>`;
+  } else {
+    updateMonitorEl.innerHTML = '';
   }
 }
-
-updateAllBtn.addEventListener('click', () => triggerUpdate('all'));
 
 function startProgressStream() {
   stopProgressStream();
   try {
     updateEventSource = new EventSource(`${BASE}/manager/progress`);
     updateEventSource.onmessage = (e) => {
-      try { renderUpdatePanel(JSON.parse(e.data)); } catch {}
+      try { renderStatusPanel(JSON.parse(e.data)); } catch {}
     };
   } catch {}
 }
