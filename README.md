@@ -28,34 +28,40 @@ A fully self-hosted, offline-capable mapping platform for Armenia built on Docke
 
 ## Architecture Overview
 
-```
-                          ┌──────────────────────────────────────────────┐
-                          │                  NGINX :80                   │
-                          │   reverse proxy · tile cache · CORS · SSE   │
-                          └────┬─────────┬──────────┬──────────┬────────┘
-                               │         │          │          │
-                      /tiles/  │  /photon/│  /osrm/  │ /manager/│
-                               ▼         ▼          ▼          ▼
-                          ┌────────┐ ┌────────┐ ┌───────┐ ┌─────────┐
-                          │  Tile  │ │ Photon │ │ OSRM  │ │ Manager │
-                          │ Server │ │Cluster │ │Backend│ │   API   │
-                          │ :8080  │ │        │ │ :5000 │ │  :8000  │
-                          └───┬────┘ │ ┌────┐ │ └───┬───┘ └────┬────┘
-                              │      │ │Blue│ │     │          │
-          minutely diffs ─────┤      │ └────┘ │     │     ┌────┴────┐
-          from OSM             │      │ ┌─────┐│     │     │ Trigger │
-                              │      │ │Green││     │     │  Files  │
-                              │      │ └─────┘│     │     └────┬────┘
-                              │      └───┬────┘     │          │
-                              │          │          │     /triggers/
-                              │     ┌────┴────┐    │    (shared vol)
-                              │     │Nominatim│    │
-                              │     │  :8080  │    │
-                              │     └─────────┘    │
-                              │                    │
-                          ┌───┴────────────────────┴───┐
-                          │     PostgreSQL / Volumes     │
-                          └────────────────────────────┘
+```mermaid
+graph TB
+    Client([Browser / 112 Dispatch])
+    Client -->|HTTP :80| NGINX
+
+    subgraph Docker["Docker Compose Stack"]
+        NGINX["NGINX<br/>reverse proxy · tile cache · CORS · SSE"]
+
+        NGINX -->|/tiles/| Tiles["Tile Server<br/>:8080"]
+        NGINX -->|/photon/| PB["Photon Blue"]
+        NGINX -->|/photon/| PG["Photon Green"]
+        NGINX -->|/osrm/| OSRM["OSRM Backend<br/>:5000"]
+        NGINX -->|/manager/| Manager["Manager API<br/>:8000"]
+
+        PB & PG -->|import from| Nominatim["Nominatim<br/>:8080"]
+        Tiles --> DB[("PostgreSQL<br/>+ Volumes")]
+        Nominatim --> DB
+        Manager -->|trigger files| Triggers[("/triggers/<br/>shared volume")]
+        OSRM -.->|polls| Triggers
+        PB -.->|polls| Triggers
+        PG -.->|polls| Triggers
+    end
+
+    OSM([OpenStreetMap<br/>minutely diffs]) -.->|replication| Tiles
+    Geofabrik([Geofabrik<br/>daily extracts]) -.->|download| OSRM
+    Geofabrik -.->|replication| Nominatim
+
+    style Client fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    style NGINX fill:#fef3c7,stroke:#d97706,color:#78350f
+    style Docker fill:#f0fdf4,stroke:#16a34a
+    style OSM fill:#fce7f3,stroke:#db2777,color:#831843
+    style Geofabrik fill:#fce7f3,stroke:#db2777,color:#831843
+    style DB fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    style Triggers fill:#fff7ed,stroke:#ea580c,color:#7c2d12
 ```
 
 **7 containers**, **10 named volumes**, fully orchestrated via Docker Compose.
@@ -107,11 +113,33 @@ curl "http://localhost/photon/api?q=Yerevan&limit=3"
 curl "http://localhost/osrm/nearest/v1/driving/44.51,40.18"
 ```
 
-On first boot, services import data sequentially:
-1. **Tile server** imports Armenia PBF + external data (water polygons, coastlines) — ~30 min
-2. **Nominatim** imports the PBF and builds the address database — ~10 min
-3. **Photon blue & green** import search indexes from Nominatim — ~1 min each
-4. **OSRM** downloads PBF, runs extract/partition/customize — ~5 min
+### Boot Sequence
+
+```mermaid
+gantt
+    title First Boot — Import Timeline
+    dateFormat X
+    axisFormat %M min
+
+    section Tile Server
+    Import PBF + external data :active, ts, 0, 30
+    Minutely replication starts :milestone, 30, 30
+
+    section Nominatim
+    Import PBF + build address DB :nom, 0, 10
+    Continuous replication :milestone, 10, 10
+
+    section Photon
+    Blue imports from Nominatim :pb, 10, 11
+    Green imports from Nominatim :pg, 11, 12
+
+    section OSRM
+    Download + extract + partition :osrm, 0, 5
+    Shared memory serve :milestone, 5, 5
+
+    section NGINX
+    Ready immediately :nginx, 0, 0.5
+```
 
 Subsequent starts skip all imports (data persisted in Docker volumes).
 
@@ -151,19 +179,20 @@ offline-armenia-map/
 │   └── zabbix/
 │       └── zbx_template_offline_map.yaml  # Zabbix 6.4+ importable template
 ├── test-app/
-│   └── index.html                    # Single-file MapLibre test app (~2070 lines)
+│   ├── index.html                    # Single-file MapLibre test app
+│   └── icons/                        # 230 OSM Carto SVG POI icons (CC0)
 └── services/
     ├── manager/
     │   ├── Dockerfile                # Python 3.13 Alpine (digest-pinned)
-    │   └── manager.py                # Update orchestration HTTP API + Prometheus metrics (~627 lines)
+    │   └── manager.py                # Update orchestration HTTP API + Prometheus metrics
     ├── photon/
     │   ├── Dockerfile                # Java 21 JRE + Photon 1.0.1 (digest-pinned)
-    │   └── entrypoint.sh             # Import, serve, trigger polling (~174 lines)
+    │   └── entrypoint.sh             # Import, serve, trigger polling
     ├── osrm/
     │   ├── Dockerfile                # OSRM v5.25.0 backend + curl (digest-pinned)
-    │   └── entrypoint.sh             # Download, prepare, shared-memory serve (~217 lines)
+    │   └── entrypoint.sh             # Download, prepare, shared-memory serve
     └── nginx/
-        └── nginx.conf                # Reverse proxy + tile cache + blue-green upstream (~222 lines)
+        └── nginx.conf                # Reverse proxy + tile cache + blue-green upstream
 ```
 
 ---
@@ -171,6 +200,26 @@ offline-armenia-map/
 ## API Reference
 
 All APIs are served through nginx on port **80**. CORS headers (`Access-Control-Allow-Origin: *`) are included on every response.
+
+```mermaid
+graph LR
+    subgraph "API Gateway — NGINX :80"
+        direction TB
+        T["/tiles/{z}/{x}/{y}.png"] --> TS["Tile Server"]
+        P["/photon/api?q=..."] --> PC["Photon Cluster"]
+        R["/osrm/route/v1/..."] --> OB["OSRM Backend"]
+        M["/manager/status"] --> MA["Manager API"]
+        H["/health"] --> HE["NGINX Health"]
+        ME["/metrics"] --> MA
+    end
+
+    style T fill:#dbeafe,stroke:#2563eb
+    style P fill:#dcfce7,stroke:#16a34a
+    style R fill:#fef9c3,stroke:#ca8a04
+    style M fill:#fce7f3,stroke:#db2777
+    style H fill:#f3e8ff,stroke:#9333ea
+    style ME fill:#f3e8ff,stroke:#9333ea
+```
 
 ### Tiles
 
@@ -276,20 +325,68 @@ GET /health                     # Stack-level health
 
 ## Test App
 
-The built-in web app at `http://localhost/` provides:
+The built-in web app at `http://localhost/` provides a full-featured mapping interface:
 
-- **Interactive map** — Full-screen MapLibre GL JS map with local raster tiles (auto-fallback to OSM CDN during import)
-- **Search** — Type-ahead geocoding with debounced autocomplete, keyboard navigation, category icons
-- **Reverse geocoding** — Right-click any point for nearest address with snap-to-nearest-road intelligence
-- **Routing** — Click two points for driving directions with turn-by-turn steps, draggable waypoint markers, dashed connector lines showing the walk from pin to nearest road
-- **Route address inputs** — Text fields for start/end with geocoding autocomplete
-- **Layer switcher** — Toggle between local and OSM CDN tiles
-- **Fullscreen mode** — Dedicated button for distraction-free viewing
-- **Map position persistence** — Position and zoom level preserved across page refreshes via localStorage
-- **Data update panel** — Real-time service status with per-instance blue/green health, progress bars, and one-click update triggers
-- **Service status bar** — Live health indicators for all services (tiles, photon-blue, photon-green, OSRM, manager)
-- **Help overlay** — Keyboard shortcuts and feature guide (`?` key)
-- **Consistent SVG icons** — All icons use Lucide-style SVGs with `stroke-width: 2.5` for visual consistency
+```mermaid
+graph TB
+    subgraph UI["Test App — Single-File MapLibre GL JS"]
+        Search["Search Bar<br/>type-ahead geocoding"]
+        Map["Interactive Map<br/>local raster tiles"]
+        Route["Routing Panel<br/>driving directions"]
+        RevGeo["Reverse Geocode<br/>right-click popup"]
+        Snap["Snap Toggle<br/>smart vs simple mode"]
+        Icons["230 OSM Carto Icons<br/>POI category display"]
+        Update["Data Update Panel<br/>SSE real-time progress"]
+        Status["Service Status Bar<br/>live health indicators"]
+    end
+
+    Search -->|Photon API| Map
+    RevGeo -->|Photon reverse| Map
+    Route -->|OSRM API| Map
+    Update -->|Manager SSE| Status
+
+    style UI fill:#f0f9ff,stroke:#0369a1
+    style Icons fill:#ecfdf5,stroke:#059669
+```
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Interactive map** | Full-screen MapLibre GL JS with local raster tiles (auto-fallback to OSM CDN during import) |
+| **Search** | Type-ahead geocoding with debounced autocomplete, keyboard navigation, 230 OSM Carto POI icons, category badges |
+| **Reverse geocoding** | Right-click any point — two modes via **Snap toggle**: smart snap-to-nearest-object with distance visualization, or simple point lookup |
+| **Routing** | Click two points for driving directions with turn-by-turn steps, draggable waypoint markers, dashed connector lines |
+| **Route address inputs** | Text fields for start/end with geocoding autocomplete |
+| **POI icons** | 230 SVG icons from [OpenStreetMap Carto](https://github.com/gravitystorm/openstreetmap-carto) (CC0) — matches the rendered map style. Covers amenities, shops, tourism, historic, leisure, transport, nature, and more |
+| **Layer switcher** | Toggle between local and OSM CDN tiles |
+| **Fullscreen mode** | Dedicated button for distraction-free viewing |
+| **Map persistence** | Position and zoom level preserved across page refreshes via localStorage |
+| **Data update panel** | Real-time service status with per-instance blue/green health, progress bars, one-click update triggers |
+| **Service status bar** | Live health indicators for all services (tiles, photon-blue, photon-green, OSRM, manager) |
+| **Help overlay** | Keyboard shortcuts and feature guide |
+
+### Snap vs Simple Reverse Geocoding
+
+```mermaid
+graph LR
+    Click["Right-click<br/>on map"]
+
+    Click -->|Snap ON| Smart["Smart Snap Mode"]
+    Click -->|Snap OFF| Simple["Simple Mode"]
+
+    Smart --> Multi["Photon multi-reverse<br/>radius=100m, limit=10"]
+    Smart --> OSRM2["OSRM nearest<br/>5 road points"]
+    Multi & OSRM2 --> Rank["Candidate ranking<br/>POI > crossroad > road"]
+    Rank --> SnapPopup["Popup at snapped point<br/>+ dashed offset line"]
+
+    Simple --> Single["Photon reverse<br/>radius=5m, limit=1"]
+    Single --> SimplePopup["Popup at click point"]
+
+    style Smart fill:#dbeafe,stroke:#2563eb
+    style Simple fill:#dcfce7,stroke:#16a34a
+    style Click fill:#fef3c7,stroke:#d97706
+```
 
 ### Keyboard Shortcuts
 
@@ -298,8 +395,26 @@ The built-in web app at `http://localhost/` provides:
 | `/` or `Ctrl+K` | Focus search |
 | `Escape` | Clear search / close panels |
 | `R` | Toggle routing mode |
+| `S` | Toggle snap mode |
 | `F` | Toggle fullscreen |
 | `?` | Show help overlay |
+
+### Icon Coverage
+
+All icons are sourced from [OpenStreetMap Carto](https://github.com/gravitystorm/openstreetmap-carto) symbols (CC0 license) for visual consistency with the rendered map tiles:
+
+| Category | Examples | Count |
+|----------|----------|-------|
+| **Amenity** | restaurant, cafe, hospital, pharmacy, bank, fuel, parking, police, library, cinema | 66 |
+| **Shop** | supermarket, bakery, clothes, electronics, furniture, copyshop, hairdresser, car_repair | 71 |
+| **Tourism** | hotel, museum, viewpoint, hostel, campsite, artwork | 20 |
+| **Historic** | monument, castle, palace, fortress, statue, archaeological_site | 15 |
+| **Leisure** | playground, fitness, golf, bowling, water_park, sauna, fishing | 16 |
+| **Man-made** | lighthouse, windmill, water_tower, observation_tower, crane | 16 |
+| **Natural** | peak, cave, spring, waterfall, saddle | 5 |
+| **Religion** | christian, muslim, jewish, buddhist, hindu, shinto, sikh, taoist | 8 |
+| **Other** | bus_stop, embassy, toll_booth, gate, elevator | 13 |
+| | | **230 total** |
 
 ---
 
@@ -307,7 +422,7 @@ The built-in web app at `http://localhost/` provides:
 
 ### Web UI
 
-Click the refresh button (↻) in the map controls to open the update panel. Each service shows its current state, last update time, and an "Update now" button. Progress is streamed in real-time via Server-Sent Events (SSE).
+Click the refresh button (&#8635;) in the map controls to open the update panel. Each service shows its current state, last update time, and an "Update now" button. Progress is streamed in real-time via Server-Sent Events (SSE).
 
 ### CLI
 
@@ -343,13 +458,31 @@ curl -N http://localhost/manager/progress
 
 ### How Triggers Work
 
-The system uses a **trigger-file architecture** on a shared Docker volume (`update-triggers`):
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Manager
+    participant Triggers as /triggers/ volume
+    participant Service as OSRM / Photon
 
-1. Manager writes a `.trigger` file (e.g., `/triggers/osrm.trigger`)
-2. Each service polls `/triggers/` every 30 seconds
-3. When a trigger is detected, the service consumes it and starts updating
-4. Status is written to `.status` files (e.g., `/triggers/osrm.status`)
-5. Manager reads status files and streams them to clients via SSE
+    Client->>Manager: POST /manager/update
+    Manager->>Manager: Rate limit check
+    Manager->>Triggers: Write osrm.trigger
+    Manager-->>Client: 200 OK (accepted)
+
+    loop Every 30 seconds
+        Service->>Triggers: Poll for .trigger file
+    end
+
+    Service->>Triggers: Detect & consume .trigger
+    Service->>Triggers: Write .status = "updating"
+    Service->>Service: Download + rebuild
+    Service->>Triggers: Write .status = "idle"
+
+    Client->>Manager: GET /manager/progress (SSE)
+    Manager->>Triggers: Read .status files
+    Manager-->>Client: SSE: status events
+```
 
 No Docker socket access required. Each service self-manages its own updates.
 
@@ -377,28 +510,21 @@ This ensures map tiles reflect OSM edits within 1-2 minutes. The nginx tile cach
 
 ### Tile Invalidation (Selective Expiry)
 
-The tile server does **not** re-render all tiles after each update. Instead, it uses a smart, selective invalidation pipeline that expires only the tiles geographically affected by the changes:
+```mermaid
+graph LR
+    A["Osmosis<br/>Download minutely diff<br/>(.osc.gz)"] --> B["osm2pgsql<br/>Import diff into PostGIS<br/>+ compute affected tile coords<br/>(-e13-20 flag)"]
+    B --> C["render_expired<br/>Read dirty-tile list<br/>and expire only those tiles"]
 
+    style A fill:#fef3c7,stroke:#d97706
+    style B fill:#dbeafe,stroke:#2563eb
+    style C fill:#dcfce7,stroke:#16a34a
 ```
-  Osmosis               osm2pgsql                 render_expired
-  ─────────           ──────────────            ─────────────────
-  Download     ──▶    Import diff into    ──▶   Read dirty-tile list
-  minutely diff       PostGIS + compute          and expire only
-  (.osc.gz)           affected tile coords       those tiles
-                      (-e13-20 flag)
-```
-
-**Step 1 — Diff download**: Osmosis fetches only the incremental changeset from OSM (typically a few KB).
-
-**Step 2 — Import + compute affected tiles**: `osm2pgsql` applies the diff to PostGIS in append mode and simultaneously computes which tile coordinates (at zoom levels 13–20) intersect the changed geometries. This list is written to a dirty-tile file.
-
-**Step 3 — Selective expiry**: `render_expired` reads the dirty-tile list and handles tiles by zoom level:
 
 | Zoom Level | Action | Behavior |
 |---|---|---|
-| **13–18** | Mark dirty (touch) | Metatile timestamp is updated; renderd re-renders on next request |
+| **13–18** | Mark dirty (touch) | Metatile timestamp updated; renderd re-renders on next request |
 | **19–20** | Delete | Tile file removed from disk; re-rendered on demand |
-| **0–12** | Not expired | Changes are typically invisible at low zoom; tiles remain cached |
+| **0–12** | Not expired | Changes typically invisible at low zoom; tiles remain cached |
 
 For a single-feature edit (e.g., a building in Yerevan), this typically expires **20–50 tiles** out of potentially millions — making the process very efficient. The `render_expired` thresholds are configurable via environment variables:
 
@@ -411,27 +537,77 @@ For a single-feature edit (e.g., a building in Yerevan), this typically expires 
 
 ### OSRM Update Cycle
 
-1. OSRM polls every 30 seconds for a trigger file
-2. Also has a scheduled interval (`DATA_UPDATE_INTERVAL`, default 24h) that checks for newer Geofabrik extracts
-3. Downloads PBF with `If-Modified-Since` header — skips if unchanged
-4. On newer extract: `osrm-extract` → `osrm-partition` → `osrm-customize` → `osrm-datastore` (shared memory load)
-5. `osrm-routed` detects the new shared memory dataset automatically — **zero downtime**
+```mermaid
+graph TD
+    Poll["Poll /triggers/ every 30s<br/>or DATA_UPDATE_INTERVAL"] --> Check{"Trigger file<br/>or schedule?"}
+    Check -->|No| Poll
+    Check -->|Yes| Download["Download PBF<br/>If-Modified-Since header"]
+    Download --> Changed{"Newer extract<br/>available?"}
+    Changed -->|No| Skip["Skip — data unchanged"]
+    Changed -->|Yes| Extract["osrm-extract"]
+    Extract --> Partition["osrm-partition"]
+    Partition --> Customize["osrm-customize"]
+    Customize --> Datastore["osrm-datastore<br/>(shared memory swap)"]
+    Datastore --> Serve["osrm-routed detects new data<br/>zero downtime"]
+    Skip --> Poll
+    Serve --> Poll
+
+    style Datastore fill:#dcfce7,stroke:#16a34a
+    style Serve fill:#dcfce7,stroke:#16a34a
+```
 
 ### Photon Rolling Update
 
-1. Manager receives update request for "photon"
-2. Writes trigger file for **blue** instance
-3. Blue stops, deletes index, reimports from Nominatim, restarts
-4. During blue's downtime, nginx routes all traffic to **green** via `proxy_next_upstream`
-5. Once blue is back to idle, manager triggers **green**
-6. Green updates while blue handles all traffic
-7. Result: **zero failed requests** throughout the entire update cycle
+```mermaid
+sequenceDiagram
+    participant Manager
+    participant Blue as Photon Blue
+    participant Green as Photon Green
+    participant NGINX
+
+    Note over NGINX: Both instances serving traffic
+
+    Manager->>Blue: Trigger update
+    Blue->>Blue: Stop, delete index, reimport
+    Note over NGINX: All traffic → Green
+    Blue->>Blue: Restart, ready
+    Note over NGINX: Both instances serving traffic
+
+    Manager->>Green: Trigger update
+    Green->>Green: Stop, delete index, reimport
+    Note over NGINX: All traffic → Blue
+    Green->>Green: Restart, ready
+    Note over NGINX: Both instances serving traffic
+
+    Note over Blue,Green: Zero failed requests throughout
+```
 
 ---
 
 ## Zero-Downtime Design
 
 This stack is designed for the **112 emergency call system** with zero-downtime requirements:
+
+```mermaid
+graph LR
+    subgraph "Zero-Downtime Strategies"
+        T["Tile Server<br/>Minutely diffs to live DB<br/>+ selective tile expiry"]
+        N["Nominatim<br/>Live replication<br/>to running database"]
+        O["OSRM<br/>POSIX shared memory<br/>atomic swap"]
+        P["Photon<br/>Blue-green deployment<br/>with nginx failover"]
+    end
+
+    T --> Z["0 ms downtime"]
+    N --> Z
+    O --> Z
+    P --> Z
+
+    style Z fill:#dcfce7,stroke:#16a34a,stroke-width:3px
+    style T fill:#dbeafe,stroke:#2563eb
+    style N fill:#dbeafe,stroke:#2563eb
+    style O fill:#dbeafe,stroke:#2563eb
+    style P fill:#dbeafe,stroke:#2563eb
+```
 
 | Service | Strategy | Downtime During Update |
 |---------|----------|----------------------|
@@ -442,20 +618,22 @@ This stack is designed for the **112 emergency call system** with zero-downtime 
 
 ### Photon Blue-Green Architecture
 
-```
-                    ┌─────────────┐
-  /photon/api ──────▶   nginx     │
-                    │  upstream   │
-                    │             │
-                    │  ┌──────┐   │  proxy_next_upstream
-                    │  │ blue │◄──┼── if one fails, retry other
-                    │  └──────┘   │
-                    │  ┌──────┐   │
-                    │  │green │◄──┼── at least one always up
-                    │  └──────┘   │
-                    └─────────────┘
+```mermaid
+graph TB
+    Request["/photon/api"] --> LB["NGINX upstream<br/>photon_cluster"]
 
-  Rolling update:  blue↓ green✓ → blue✓ green↓ → blue✓ green✓
+    LB --> Blue["Photon Blue"]
+    LB --> Green["Photon Green"]
+
+    Blue -.->|"if error"| Retry["proxy_next_upstream<br/>retry the other instance"]
+    Retry --> Green
+
+    Note["Rolling update:<br/>blue↓ green✓ → blue✓ green↓ → blue✓ green✓"]
+
+    style LB fill:#fef3c7,stroke:#d97706
+    style Blue fill:#dbeafe,stroke:#2563eb
+    style Green fill:#dcfce7,stroke:#16a34a
+    style Retry fill:#fce7f3,stroke:#db2777
 ```
 
 nginx configuration:
@@ -588,18 +766,31 @@ A ready-to-import Zabbix template is provided at `monitoring/zabbix/zbx_template
 
 ### Triggers
 
-| Severity | Trigger | Description |
-|----------|---------|-------------|
-| **DISASTER** | Both Photon instances down | Geocoding completely unavailable — 112 dispatchers cannot search addresses |
-| **DISASTER** | Both Photon instances updating | Rolling update safety violated — zero geocoding capacity |
-| **DISASTER** | NGINX unreachable | Entire stack inaccessible |
-| **HIGH** | OSRM in error state | Routing engine failed |
-| **HIGH** | Photon degraded | At least one instance in error (failover active, capacity reduced) |
-| **HIGH** | Manager unreachable | Status API and on-demand updates unavailable |
-| **WARNING** | OSRM data stale (>48h) | Routing data not updated — new roads/closures not reflected |
-| **WARNING** | Photon data stale (>48h) | Geocoding data not updated — address search may be outdated |
-| **WARNING** | OSRM update stuck (>30 min) | Update taking longer than expected for Armenia-sized data |
-| **WARNING** | Update error occurred | Error counter incremented — check manager logs |
+```mermaid
+graph LR
+    subgraph DISASTER["DISASTER"]
+        D1["Both Photon instances down"]
+        D2["Both Photon instances updating"]
+        D3["NGINX unreachable"]
+    end
+
+    subgraph HIGH["HIGH"]
+        H1["OSRM in error state"]
+        H2["Photon degraded<br/>(one instance in error)"]
+        H3["Manager unreachable"]
+    end
+
+    subgraph WARNING["WARNING"]
+        W1["OSRM data stale >48h"]
+        W2["Photon data stale >48h"]
+        W3["OSRM update stuck >30 min"]
+        W4["Update error occurred"]
+    end
+
+    style DISASTER fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    style HIGH fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    style WARNING fill:#fef9c3,stroke:#ca8a04,color:#713f12
+```
 
 ### Dashboard
 
@@ -611,33 +802,31 @@ The template includes a built-in **Map Stack Overview** dashboard with service s
 
 In production, this stack uses **two nginx instances** — one inside Docker (the API gateway) and one on the host (the SSL reverse proxy). Each handles a distinct layer of concerns:
 
-```
-Internet
-   │
-   ▼
-┌────────────────────────────────────┐
-│  Host NGINX (SSL Reverse Proxy)    │  ← Infrastructure layer
-│  - TLS termination (Let's Encrypt) │
-│  - Domain name / virtual hosts     │
-│  - IP allowlisting / rate limiting │
-│  - DDoS protection                 │
-└──────────────┬─────────────────────┘
-               │  http://127.0.0.1:80
-               ▼
-┌────────────────────────────────────┐
-│  Docker NGINX (API Gateway)        │  ← Application layer
-│  - Blue-green Photon failover      │
-│  - Tile caching (2 GB, stale)      │
-│  - CORS headers on all endpoints   │
-│  - Service routing (5 backends)    │
-│  - SSE proxy for manager           │
-│  - JSON error responses            │
-│  - Security headers                │
-└──┬──────┬──────┬──────┬──────┬─────┘
-   │      │      │      │      │
-   ▼      ▼      ▼      ▼      ▼
- Tiles  Photon  Photon  OSRM  Manager
-        Blue    Green
+```mermaid
+graph TB
+    Internet([Internet]) --> HostNGINX
+
+    subgraph Host["Host Layer"]
+        HostNGINX["Host NGINX<br/>(SSL Reverse Proxy)<br/>─────────────<br/>TLS termination<br/>Domain / virtual hosts<br/>IP allowlisting<br/>DDoS protection"]
+    end
+
+    HostNGINX -->|"http://127.0.0.1:80"| DockerNGINX
+
+    subgraph Docker["Docker Layer"]
+        DockerNGINX["Docker NGINX<br/>(API Gateway)<br/>─────────────<br/>Blue-green failover<br/>Tile caching (2 GB)<br/>CORS headers<br/>Service routing<br/>SSE proxy<br/>JSON error responses"]
+
+        DockerNGINX --> Tiles["Tiles"]
+        DockerNGINX --> PBlue["Photon<br/>Blue"]
+        DockerNGINX --> PGreen["Photon<br/>Green"]
+        DockerNGINX --> OSRM2["OSRM"]
+        DockerNGINX --> Mgr["Manager"]
+    end
+
+    style Internet fill:#e0f2fe,stroke:#0284c7
+    style Host fill:#fef3c7,stroke:#d97706
+    style Docker fill:#f0fdf4,stroke:#16a34a
+    style HostNGINX fill:#fef9c3,stroke:#d97706
+    style DockerNGINX fill:#dcfce7,stroke:#16a34a
 ```
 
 ### Why the Docker NGINX Can't Be Removed
