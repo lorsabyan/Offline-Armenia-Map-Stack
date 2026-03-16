@@ -2451,10 +2451,6 @@ function renderStatusPanel(data) {
     const relTime = formatRelativeTime(s.last_update);
     const absTime = s.last_update ? new Date(s.last_update).toLocaleString() : '';
 
-    // Next update info (only for osrm and photon)
-    const nextInfo = (svc.key === 'osrm' || svc.key === 'photon')
-      ? getNextUpdateInfo(data, svc.key) : null;
-
     // Photon blue-green instance detail
     let instancesHtml = '';
     if (svc.key === 'photon' && s.instances) {
@@ -2464,9 +2460,35 @@ function renderStatusPanel(data) {
         ).join('') + '</div>';
     }
 
-    // Build time info lines
+    // Build time info lines — uniform for all services
     let timeHtml = '';
-    if (!isAuto) {
+
+    // --- Last updated ---
+    if (svc.key === 'tile_server') {
+      // Tile server replicates continuously; show probe as "last checked"
+      const probe = _healthCache.tile_server;
+      if (probe) {
+        const probeRel = formatRelativeTime(new Date(probe.checkedAt).toISOString());
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Last checked:</span> <span class="${probe.ok ? 'time-value' : 'time-error'}">${probeRel || 'just now'} · ${probe.ok ? 'Healthy' : 'Unreachable'} (${probe.latency}ms)${probe.cacheStatus ? ' · cache: ' + probe.cacheStatus : ''}</span></div>`;
+      } else {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Last checked:</span> <span class="time-value">Pending</span></div>`;
+      }
+    } else if (svc.key === 'nominatim') {
+      const monitor = s.data_change_monitor;
+      const lastData = monitor?.last_data_updated;
+      const dataRel = formatRelativeTime(lastData);
+      const dataAbs = lastData ? new Date(lastData).toLocaleString() : '';
+      if (dataRel) {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value" title="${esc(dataAbs)}">${esc(dataRel)}</span></div>`;
+      } else {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value">Unknown</span></div>`;
+      }
+      const probe = _healthCache.nominatim;
+      if (probe) {
+        timeHtml += `<div class="update-svc-time"><span class="time-label">Search probe:</span> <span class="${probe.ok ? 'time-value' : 'time-error'}">${probe.ok ? 'Healthy' : 'Unreachable'} (${probe.latency}ms)</span></div>`;
+      }
+    } else {
+      // OSRM, Photon
       if (isError && relTime) {
         timeHtml += `<div class="update-svc-time"><span class="time-label">Last failure:</span> <span class="time-error" title="${esc(absTime)}">${esc(relTime)}</span></div>`;
       } else if (relTime) {
@@ -2474,40 +2496,20 @@ function renderStatusPanel(data) {
       } else {
         timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value">Never</span></div>`;
       }
-      if (nextInfo && !isUpdating) {
+    }
+
+    // --- Next check / scheduled update ---
+    if (svc.key === 'tile_server') {
+      timeHtml += `<div class="update-svc-time"><span class="time-label">Next check:</span> <span class="time-next">Continuous (every ~1 min)</span></div>`;
+    } else if (svc.key === 'nominatim') {
+      const pollMin = Math.round((s.data_change_monitor?.poll_interval_s || 300) / 60);
+      timeHtml += `<div class="update-svc-time"><span class="time-label">Next check:</span> <span class="time-next">Continuous (every ${pollMin}m)</span></div>`;
+    } else if (!isUpdating) {
+      // OSRM, Photon — show scheduled check + auto-update info
+      const nextInfo = getNextUpdateInfo(data, svc.key);
+      if (nextInfo) {
         for (const line of nextInfo.lines) {
           timeHtml += `<div class="update-svc-time"><span class="time-label">${esc(line.label)}:</span> <span class="time-next">${esc(line.text)}</span></div>`;
-        }
-      }
-    } else {
-      // Auto services — show update mode + live health probe
-      if (svc.key === 'tile_server') {
-        timeHtml = '<div class="update-svc-time"><span class="time-label">Updates:</span> <span class="time-value">OSM minutely replication diffs</span></div>';
-        const probe = _healthCache.tile_server;
-        if (probe) {
-          const status = probe.ok ? 'Healthy' : 'Unreachable';
-          const statusClass = probe.ok ? 'time-value' : 'time-error';
-          let detail = `${status}`;
-          if (probe.ok) detail += ` (${probe.latency}ms)`;
-          if (probe.cacheStatus) detail += ` · cache: ${probe.cacheStatus}`;
-          timeHtml += `<div class="update-svc-time"><span class="time-label">Tile probe:</span> <span class="${statusClass}">${esc(detail)}</span></div>`;
-        }
-      } else if (svc.key === 'nominatim') {
-        const monitor = s.data_change_monitor;
-        const lastData = monitor?.last_data_updated;
-        const dataRel = formatRelativeTime(lastData);
-        const dataAbs = lastData ? new Date(lastData).toLocaleString() : '';
-        timeHtml = `<div class="update-svc-time"><span class="time-label">Updates:</span> <span class="time-value">Geofabrik replication</span></div>`;
-        if (dataRel) {
-          timeHtml += `<div class="update-svc-time"><span class="time-label">Last data change:</span> <span class="time-value" title="${esc(dataAbs)}">${esc(dataRel)}</span></div>`;
-        }
-        const probe = _healthCache.nominatim;
-        if (probe) {
-          const status = probe.ok ? 'Healthy' : 'Unreachable';
-          const statusClass = probe.ok ? 'time-value' : 'time-error';
-          let detail = `${status}`;
-          if (probe.ok) detail += ` (${probe.latency}ms)`;
-          timeHtml += `<div class="update-svc-time"><span class="time-label">Search probe:</span> <span class="${statusClass}">${esc(detail)}</span></div>`;
         }
       }
     }
