@@ -722,6 +722,9 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
     # ── Proxy to Docker stack on localhost:80 ──
+    # IMPORTANT: Do NOT add Access-Control-Allow-Origin or other CORS headers here.
+    # The Docker-internal nginx already sets CORS headers on all responses.
+    # Adding them here causes duplicate header values ("*, *") which browsers reject.
     location / {
         proxy_pass http://127.0.0.1:80;
 
@@ -891,6 +894,9 @@ docker compose ps
 curl http://localhost/manager/status
 ```
 NGINX starts immediately but proxied services may still be importing on first boot.
+
+### CORS error: "Access-Control-Allow-Origin header contains multiple values"
+This happens when both the host nginx and the Docker nginx add `Access-Control-Allow-Origin: *`, resulting in `*, *` which browsers reject. The Docker nginx already sets all CORS headers — **do not add CORS headers in your host nginx config**. Check your host nginx for any `add_header Access-Control-Allow-Origin` directives and remove them.
 
 ---
 
