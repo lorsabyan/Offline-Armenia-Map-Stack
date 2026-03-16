@@ -2359,6 +2359,37 @@ function getNextUpdateInfo(data, serviceKey) {
   return lines.length > 0 ? { lines } : null;
 }
 
+// Live health probes for auto services (tile server, nominatim)
+const _healthCache = {};
+
+async function probeTileServer() {
+  try {
+    const t0 = performance.now();
+    const res = await fetch(`${BASE}/tiles/8/156/96.png?_t=${Date.now()}`, { cache: 'no-store' });
+    const latency = Math.round(performance.now() - t0);
+    const cacheStatus = res.headers.get('X-Cache-Status') || '';
+    _healthCache.tile_server = { ok: res.ok, latency, cacheStatus, checkedAt: Date.now() };
+  } catch {
+    _healthCache.tile_server = { ok: false, latency: 0, cacheStatus: '', checkedAt: Date.now() };
+  }
+}
+
+async function probeNominatim() {
+  try {
+    const t0 = performance.now();
+    const res = await fetch(`${BASE}/photon/api?q=test&limit=1`);
+    const latency = Math.round(performance.now() - t0);
+    _healthCache.nominatim = { ok: res.ok, latency, checkedAt: Date.now() };
+  } catch {
+    _healthCache.nominatim = { ok: false, latency: 0, checkedAt: Date.now() };
+  }
+}
+
+function runHealthProbes() {
+  probeTileServer();
+  probeNominatim();
+}
+
 updateBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   const wasVisible = updatePanel.classList.contains('visible');
@@ -2366,6 +2397,7 @@ updateBtn.addEventListener('click', (e) => {
   if (!wasVisible) {
     fetchUpdateStatus();
     startProgressStream();
+    runHealthProbes();
   } else {
     stopProgressStream();
   }
@@ -2448,9 +2480,18 @@ function renderStatusPanel(data) {
         }
       }
     } else {
-      // Auto services — show update mode
+      // Auto services — show update mode + live health probe
       if (svc.key === 'tile_server') {
-        timeHtml = '<div class="update-svc-time"><span class="time-label">Updates:</span> <span class="time-value">Continuous (minutely diffs)</span></div>';
+        timeHtml = '<div class="update-svc-time"><span class="time-label">Updates:</span> <span class="time-value">OSM minutely replication diffs</span></div>';
+        const probe = _healthCache.tile_server;
+        if (probe) {
+          const status = probe.ok ? 'Healthy' : 'Unreachable';
+          const statusClass = probe.ok ? 'time-value' : 'time-error';
+          let detail = `${status}`;
+          if (probe.ok) detail += ` (${probe.latency}ms)`;
+          if (probe.cacheStatus) detail += ` · cache: ${probe.cacheStatus}`;
+          timeHtml += `<div class="update-svc-time"><span class="time-label">Tile probe:</span> <span class="${statusClass}">${esc(detail)}</span></div>`;
+        }
       } else if (svc.key === 'nominatim') {
         const monitor = s.data_change_monitor;
         const lastData = monitor?.last_data_updated;
@@ -2459,6 +2500,14 @@ function renderStatusPanel(data) {
         timeHtml = `<div class="update-svc-time"><span class="time-label">Updates:</span> <span class="time-value">Geofabrik replication</span></div>`;
         if (dataRel) {
           timeHtml += `<div class="update-svc-time"><span class="time-label">Last data change:</span> <span class="time-value" title="${esc(dataAbs)}">${esc(dataRel)}</span></div>`;
+        }
+        const probe = _healthCache.nominatim;
+        if (probe) {
+          const status = probe.ok ? 'Healthy' : 'Unreachable';
+          const statusClass = probe.ok ? 'time-value' : 'time-error';
+          let detail = `${status}`;
+          if (probe.ok) detail += ` (${probe.latency}ms)`;
+          timeHtml += `<div class="update-svc-time"><span class="time-label">Search probe:</span> <span class="${statusClass}">${esc(detail)}</span></div>`;
         }
       }
     }
@@ -2488,12 +2537,18 @@ function renderStatusPanel(data) {
   }
 }
 
+let _lastProbeTime = 0;
 function startProgressStream() {
   stopProgressStream();
   try {
     updateEventSource = new EventSource(`${BASE}/manager/progress`);
     updateEventSource.onmessage = (e) => {
       try { renderStatusPanel(JSON.parse(e.data)); } catch {}
+      // Re-run health probes every 30s while panel is open
+      if (Date.now() - _lastProbeTime > 30000) {
+        _lastProbeTime = Date.now();
+        runHealthProbes();
+      }
     };
   } catch {}
 }
