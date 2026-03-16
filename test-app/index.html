@@ -2314,21 +2314,49 @@ function formatCountdown(seconds) {
   return remMin > 0 ? `~${hr}h ${remMin}m` : `~${hr}h`;
 }
 
-/** Compute estimated next auto-update from nominatim monitor data. */
-function getNextAutoUpdate(data, serviceKey) {
+/** Compute next update info for a service.
+ *  Returns { lines: [{label, text}] } with one or more timing lines. */
+function getNextUpdateInfo(data, serviceKey) {
   const monitor = data.nominatim?.data_change_monitor;
-  if (!monitor?.enabled) return null;
-  const autoTrigger = monitor.auto_triggers?.[serviceKey];
-  if (!autoTrigger) return null;
-  const lastTrigger = autoTrigger.last_auto_trigger;
-  const cooldown = autoTrigger.cooldown_s;
-  if (!lastTrigger || !cooldown) return null;
-  const lastTriggerTime = new Date(lastTrigger).getTime();
-  if (isNaN(lastTriggerTime)) return null;
-  const nextTime = lastTriggerTime + cooldown * 1000;
-  const remaining = (nextTime - Date.now()) / 1000;
-  if (remaining <= 0) return { text: 'On next data change', remaining: 0 };
-  return { text: `in ${formatCountdown(remaining)}`, remaining };
+  const svcData = data[serviceKey] || {};
+  const lines = [];
+
+  // 1. OSRM scheduled interval (from osrm.status.scheduled_interval_s)
+  if (serviceKey === 'osrm' && svcData.scheduled_interval_s && svcData.last_update) {
+    const interval = svcData.scheduled_interval_s;
+    const lastUpdate = new Date(svcData.last_update).getTime();
+    if (!isNaN(lastUpdate) && interval > 0) {
+      const nextTime = lastUpdate + interval * 1000;
+      const remaining = (nextTime - Date.now()) / 1000;
+      if (remaining > 0) {
+        lines.push({ label: 'Scheduled check', text: `in ${formatCountdown(remaining)}` });
+      } else {
+        lines.push({ label: 'Scheduled check', text: 'due now' });
+      }
+    }
+  }
+
+  // 2. Auto-trigger cooldown (from nominatim monitor)
+  if (monitor?.enabled) {
+    const autoTrigger = monitor.auto_triggers?.[serviceKey];
+    if (autoTrigger?.last_auto_trigger && autoTrigger?.cooldown_s) {
+      const lastTriggerTime = new Date(autoTrigger.last_auto_trigger).getTime();
+      if (!isNaN(lastTriggerTime)) {
+        const nextTime = lastTriggerTime + autoTrigger.cooldown_s * 1000;
+        const remaining = (nextTime - Date.now()) / 1000;
+        if (remaining > 0) {
+          lines.push({ label: 'Cooldown', text: `${formatCountdown(remaining)} remaining` });
+        } else {
+          lines.push({ label: 'Auto-update', text: 'ready on next data change' });
+        }
+      }
+    } else {
+      // No auto-trigger yet — show readiness
+      lines.push({ label: 'Auto-update', text: 'ready on next data change' });
+    }
+  }
+
+  return lines.length > 0 ? { lines } : null;
 }
 
 updateBtn.addEventListener('click', (e) => {
@@ -2391,9 +2419,9 @@ function renderStatusPanel(data) {
     const relTime = formatRelativeTime(s.last_update);
     const absTime = s.last_update ? new Date(s.last_update).toLocaleString() : '';
 
-    // Next auto-update estimate (only for osrm and photon)
-    const nextUpdate = (svc.key === 'osrm' || svc.key === 'photon')
-      ? getNextAutoUpdate(data, svc.key) : null;
+    // Next update info (only for osrm and photon)
+    const nextInfo = (svc.key === 'osrm' || svc.key === 'photon')
+      ? getNextUpdateInfo(data, svc.key) : null;
 
     // Photon blue-green instance detail
     let instancesHtml = '';
@@ -2414,8 +2442,10 @@ function renderStatusPanel(data) {
       } else {
         timeHtml += `<div class="update-svc-time"><span class="time-label">Last updated:</span> <span class="time-value">Never</span></div>`;
       }
-      if (nextUpdate && !isUpdating) {
-        timeHtml += `<div class="update-svc-time"><span class="time-label">Next update:</span> <span class="time-next">${esc(nextUpdate.text)}</span></div>`;
+      if (nextInfo && !isUpdating) {
+        for (const line of nextInfo.lines) {
+          timeHtml += `<div class="update-svc-time"><span class="time-label">${esc(line.label)}:</span> <span class="time-next">${esc(line.text)}</span></div>`;
+        }
       }
     } else {
       // Auto services — show update mode

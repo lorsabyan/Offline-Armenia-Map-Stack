@@ -44,8 +44,8 @@ write_status() {
   # Use jq for proper JSON escaping; fall back to minimal JSON on failure
   # so a status-write error never crashes the service under set -e
   if ! jq -n --arg s "$state" --arg m "$message" --arg p "$progress" \
-    --arg lu "$last_update" --arg ts "$ts" \
-    '{state:$s,message:$m,progress:$p,last_update:$lu,updated_at:$ts}' > "$tmp_file" 2>/dev/null; then
+    --arg lu "$last_update" --arg ts "$ts" --argjson interval "$DATA_UPDATE_INTERVAL" \
+    '{state:$s,message:$m,progress:$p,last_update:$lu,updated_at:$ts,scheduled_interval_s:$interval}' > "$tmp_file" 2>/dev/null; then
     printf '{"state":"%s","message":"status write degraded","updated_at":"%s"}' \
       "${state//\"/\\\"}" "$ts" > "$tmp_file"
   fi
