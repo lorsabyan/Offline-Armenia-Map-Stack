@@ -37,7 +37,7 @@ graph TB
     subgraph Docker["Docker Compose Stack"]
         NGINX["NGINX<br/>reverse proxy · tile cache · CORS · SSE"]
 
-        NGINX -->|/tiles/| Tiles["Tile Server<br/>:8080"]
+        NGINX -->|/tiles/| Tiles["Tile Server<br/>:80"]
         NGINX -->|/photon/| PB["Photon Blue"]
         NGINX -->|/photon/| PG["Photon Green"]
         NGINX -->|/osrm/| OSRM["OSRM Backend<br/>:5000"]
@@ -81,7 +81,7 @@ graph TB
 | **photon-green** | `./services/photon` | Geocoding search API (instance 2 of 2) | — | Automatic (data-change monitor) + on-demand |
 | **osrm** | `./services/osrm` | Routing engine (driving directions) | — | Automatic (data-change monitor) + on-demand |
 | **manager** | `./services/manager` | Update orchestration + data-change monitor | — | N/A (orchestrator) |
-| **nginx** | `nginx:1.27-alpine` | Reverse proxy, tile cache, CORS, load balancer | **80** | N/A (proxy) |
+| **nginx** | `nginx:1.27-alpine` (pinned by digest) | Reverse proxy, tile cache, rate limiting, load balancer | **80** | N/A (proxy) |
 
 ---
 
@@ -103,12 +103,13 @@ cd offline-armenia-map
 cp .env.example .env         # edit .env for production (passwords, tokens)
 docker compose up -d --build
 
-# 2. Wait for initial imports (30-45 min on first boot)
+# 2. Wait for initial imports (~40 min on first boot for tile server)
+#    Search + routing ready in ~1 min; tiles take longer (water polygon download)
 docker compose ps          # watch for "healthy" status
 docker compose logs -f     # monitor import progress
 
 # 3. Open the test app
-open http://localhost/
+open http://localhost/      # or http://127.0.0.1/
 
 # 4. Verify APIs
 curl http://localhost/health
@@ -125,26 +126,30 @@ gantt
     axisFormat %M min
 
     section Tile Server
-    Import PBF + external data :active, ts, 0, 30
-    Minutely replication starts :milestone, 30, 30
+    Import PBF + water polygons :active, ts, 0, 40
+    Minutely replication starts :milestone, 40, 40
 
     section Nominatim
-    Import PBF + build address DB :nom, 0, 10
-    Continuous replication :milestone, 10, 10
+    Import PBF + build address DB :nom, 0, 3
+    Continuous replication :milestone, 3, 3
+
+    section Manager
+    Start + fix volume perms :mgr, 3, 3.5
+    Data-change monitor :milestone, 3.5, 3.5
 
     section Photon
-    Blue imports from Nominatim :pb, 10, 11
-    Green imports from Nominatim :pg, 11, 12
+    Blue imports from Nominatim :pb, 4, 5
+    Green imports from Nominatim :pg, 5, 6
 
     section OSRM
-    Download + extract + partition :osrm, 0, 5
+    Download PBF + extract + load :osrm, 4, 5
     Shared memory serve :milestone, 5, 5
 
     section NGINX
     Ready immediately :nginx, 0, 0.5
 ```
 
-Subsequent starts skip all imports (data persisted in Docker volumes).
+> **Search + routing available in ~1 minute** after Nominatim is healthy. Tile rendering takes ~40 minutes on first boot (water polygon download). Subsequent starts skip all imports (data persisted in Docker volumes).
 
 ---
 
@@ -168,6 +173,8 @@ Copy `.env.example` to `.env` and adjust for your environment. The `.env` file i
 | `POLL_INTERVAL` | `30` | Trigger polling interval for OSRM and Photon (seconds) |
 | `NOMINATIM_AUTO_UPDATE` | `enabled` | Auto-trigger Photon + OSRM when Nominatim data changes |
 | `NOMINATIM_POLL_INTERVAL` | `300` | How often (seconds) to poll Nominatim `/status` for data changes |
+| `PHOTON_IMPORT_HEAP` | `1g` | JVM heap for Photon import phase |
+| `PHOTON_SERVE_HEAP` | `512m` | JVM heap for Photon serve phase |
 | `PHOTON_AUTO_UPDATE_COOLDOWN` | `3600` | Minimum seconds between auto-triggered Photon updates |
 | `OSRM_AUTO_UPDATE_COOLDOWN` | `3600` | Minimum seconds between auto-triggered OSRM updates |
 
@@ -345,7 +352,7 @@ graph TB
         RevGeo["Reverse Geocode<br/>right-click popup"]
         Snap["Snap Toggle<br/>smart vs simple mode"]
         Icons["230 OSM Carto Icons<br/>POI category display"]
-        Update["Data Update Panel<br/>SSE real-time progress"]
+        Update["Service Status Panel<br/>SSE real-time monitoring"]
         Status["Service Status Bar<br/>live health indicators"]
     end
 
@@ -371,7 +378,7 @@ graph TB
 | **Layer switcher** | Toggle between local and OSM CDN tiles |
 | **Fullscreen mode** | Dedicated button for distraction-free viewing |
 | **Map persistence** | Position and zoom level preserved across page refreshes via localStorage |
-| **Data update panel** | Real-time service status with per-instance blue/green health, progress bars, one-click update triggers |
+| **Service status panel** | Read-only monitor with per-instance blue/green health, last updated timestamps, next scheduled check countdowns, live health probes with latency, auto-update monitor state. Updated in real-time via SSE |
 | **Service status bar** | Live health indicators for all services (tiles, photon-blue, photon-green, OSRM, manager) |
 | **Help overlay** | Keyboard shortcuts and feature guide |
 
@@ -499,11 +506,11 @@ The autonomous system has multiple safety layers:
 
 ## On-Demand Updates
 
-### Web UI
+### Status Monitoring (Web UI)
 
 Click the refresh button (&#8635;) in the map controls to open the **Service Status** panel. It shows real-time status for all services including last update timestamps, next scheduled check countdowns, Photon blue/green instance health, live health probes with latency, and the auto-update monitor state. The panel is read-only — all updates are autonomous. Data is streamed in real-time via Server-Sent Events (SSE).
 
-### CLI
+### Triggering Updates (CLI)
 
 ```bash
 # Check status of all services
@@ -1187,9 +1194,9 @@ This happens when both the host nginx and the Docker nginx add `Access-Control-A
 
 | Port | Service | Access |
 |------|---------|--------|
-| **80** | nginx (all APIs + test app) | Primary entry point |
-| 8080 | tile-server (direct) | Debug only |
-| 5002 | OSRM (direct) | Debug only |
+| **80** | nginx (all APIs + test app) | Primary entry point (`127.0.0.1` only) |
+
+All backend services (tile-server, nominatim, photon, osrm, manager) are internal-only on the `map-internal` Docker network — no host ports exposed.
 
 ---
 
