@@ -15,7 +15,7 @@ A fully self-hosted, offline-capable mapping platform for Armenia built on Docke
 - [API Reference](#api-reference)
 - [Test App](#test-app)
 - [Autonomous Update Chain](#autonomous-update-chain)
-- [On-Demand Updates](#on-demand-updates)
+- [Operations](#operations)
 - [Update Flow & Data Freshness](#update-flow--data-freshness)
 - [Zero-Downtime Design](#zero-downtime-design)
 - [Health Checks](#health-checks)
@@ -77,9 +77,9 @@ graph TB
 |---------|--------------|---------|------|-----------------|
 | **tile-server** | `ghcr.io/overv/openstreetmap-tile-server` | Raster tile rendering (z/x/y PNG) | — | Automatic minutely diffs from OSM |
 | **nominatim** | `mediagis/nominatim:4.5` | Geocoding database (PostgreSQL + address index) | — | Automatic Geofabrik replication |
-| **photon-blue** | `./services/photon` | Geocoding search API (instance 1 of 2) | — | Automatic (data-change monitor) + on-demand |
-| **photon-green** | `./services/photon` | Geocoding search API (instance 2 of 2) | — | Automatic (data-change monitor) + on-demand |
-| **osrm** | `./services/osrm` | Routing engine (driving directions) | — | Automatic (data-change monitor) + on-demand |
+| **photon-blue** | `./services/photon` | Geocoding search API (instance 1 of 2) | — | Automatic (data-change monitor) |
+| **photon-green** | `./services/photon` | Geocoding search API (instance 2 of 2) | — | Automatic (data-change monitor) |
+| **osrm** | `./services/osrm` | Routing engine (driving directions) | — | Automatic (data-change monitor) |
 | **manager** | `./services/manager` | Update orchestration + data-change monitor | — | N/A (orchestrator) |
 | **nginx** | `nginx:1.27-alpine` (pinned by digest) | Reverse proxy, tile cache, rate limiting, load balancer | **80** | N/A (proxy) |
 
@@ -119,37 +119,18 @@ curl "http://localhost/osrm/nearest/v1/driving/44.51,40.18"
 
 ### Boot Sequence
 
-```mermaid
-gantt
-    title First Boot — Import Timeline
-    dateFormat X
-    axisFormat %M min
+| Minute | Event |
+|--------|-------|
+| 0:00 | Nominatim + Tile Server start importing |
+| ~3:00 | Nominatim healthy → Manager starts, begins monitoring |
+| ~4:00 | Manager healthy → Photon Blue + Green + OSRM start |
+| ~4:30 | OSRM: PBF downloaded from Geofabrik |
+| ~5:00 | OSRM: extract + load complete, **routing available** |
+| ~5:00 | Photon Blue: import complete, **search available** |
+| ~5:30 | Photon Green: import complete, both instances serving |
+| ~40:00 | Tile Server: water polygon download + import complete, **tiles available** |
 
-    section Tile Server
-    Import PBF + water polygons :active, ts, 0, 40
-    Minutely replication starts :milestone, 40, 40
-
-    section Nominatim
-    Import PBF + build address DB :nom, 0, 3
-    Continuous replication :milestone, 3, 3
-
-    section Manager
-    Start + fix volume perms :mgr, 3, 3.5
-    Data-change monitor :milestone, 3.5, 3.5
-
-    section Photon
-    Blue imports from Nominatim :pb, 4, 5
-    Green imports from Nominatim :pg, 5, 6
-
-    section OSRM
-    Download PBF + extract + load :osrm, 4, 5
-    Shared memory serve :milestone, 5, 5
-
-    section NGINX
-    Ready immediately :nginx, 0, 0.5
-```
-
-> **Search + routing available in ~1 minute** after Nominatim is healthy. Tile rendering takes ~40 minutes on first boot (water polygon download). Subsequent starts skip all imports (data persisted in Docker volumes).
+> **Search + routing available in ~5 minutes.** Tile rendering takes ~40 minutes on first boot (water polygon download). Subsequent starts skip all imports (data persisted in Docker volumes) and all services are ready in under 1 minute.
 
 ---
 
@@ -187,7 +168,7 @@ offline-armenia-map/
 ├── .env.example                      # Configuration template (copy to .env)
 ├── .gitignore                        # Git ignore rules
 ├── docker-compose.yml                # Service orchestration (7 services, 10 volumes)
-├── update.sh                         # CLI for on-demand data updates
+├── update.sh                         # CLI for status checks and manual triggers
 ├── README.md                         # This documentation
 ├── monitoring/
 │   └── zabbix/
@@ -279,7 +260,7 @@ Distance/duration matrix between multiple points.
 
 ```
 GET  /manager/status     # JSON status of all services
-POST /manager/update     # Trigger on-demand update
+POST /manager/update     # Trigger manual update (ops use)
 GET  /manager/progress   # SSE stream of real-time status changes
 GET  /metrics            # Prometheus exposition format metrics
 ```
@@ -497,20 +478,20 @@ graph LR
 The autonomous system has multiple safety layers:
 
 - **OSRM backup polling**: Independent 24-hour scheduled cycle (`DATA_UPDATE_INTERVAL`) as belt-and-suspenders
-- **Manual triggers**: `POST /manager/update` and `./update.sh` always available for immediate updates
+- **Ops CLI**: `POST /manager/update` and `./update.sh` available for immediate triggers when needed
 - **Cooldown protection**: Prevents rapid re-triggers when Nominatim applies many small diffs
 - **Blue-green safety**: Never takes both Photon instances down simultaneously (30-minute timeout guard)
 - **OSRM `If-Modified-Since`**: Avoids unnecessary rebuilds when PBF hasn't changed yet
 
 ---
 
-## On-Demand Updates
+## Operations
 
 ### Status Monitoring (Web UI)
 
-Click the refresh button (&#8635;) in the map controls to open the **Service Status** panel. It shows real-time status for all services including last update timestamps, next scheduled check countdowns, Photon blue/green instance health, live health probes with latency, and the auto-update monitor state. The panel is read-only — all updates are autonomous. Data is streamed in real-time via Server-Sent Events (SSE).
+Click the refresh button (&#8635;) in the map controls to open the **Service Status** panel. It shows real-time status for all services including last update timestamps, next scheduled check countdowns, Photon blue/green instance health, live health probes with latency, and the auto-update monitor state. The panel is read-only — all updates are fully autonomous.
 
-### Triggering Updates (CLI)
+### CLI Tools
 
 ```bash
 # Check status of all services
@@ -560,7 +541,7 @@ sequenceDiagram
     Monitor->>Monitor: Compare with last known timestamp
     Monitor->>Triggers: Write photon-blue.trigger + osrm.trigger
 
-    Note over Manager: Manual path (on-demand)
+    Note over Manager: Manual path (ops CLI)
     Manager->>Manager: POST /update → rate limit check
     Manager->>Triggers: Write .trigger file
 
@@ -584,8 +565,8 @@ No Docker socket access required. Each service self-manages its own updates.
 |---------|-----------|-----------------|----------------|
 | **Tile Server** | OSM minutely diffs (planet.openstreetmap.org) | Automatic, every minute | **~1-3 minutes** |
 | **Nominatim** | Geofabrik Armenia updates | Automatic, continuous replication | **~15 minutes** |
-| **Photon** | Reimport from local Nominatim | Automatic (data-change monitor) + on-demand | **~20 minutes** |
-| **OSRM** | Geofabrik Armenia PBF extract | Automatic (data-change monitor) + on-demand | **~25 minutes** |
+| **Photon** | Reimport from local Nominatim | Automatic (data-change monitor) | **~20 minutes** |
+| **OSRM** | Geofabrik Armenia PBF extract | Automatic (data-change monitor) | **~25 minutes** |
 
 ### Tile Server Replication
 
