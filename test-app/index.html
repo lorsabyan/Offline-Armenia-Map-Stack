@@ -964,7 +964,7 @@ function copyToClipboard(text) {
   navigator.clipboard.writeText(text).then(() => showToast('Copied!')).catch(() => {});
 }
 
-function typeIcon(type) {
+function typeIcon(type, osmKey) {
   const S = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">';
   const pin = S + '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>';
   const home = S + '<path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>';
@@ -1052,7 +1052,6 @@ function typeIcon(type) {
   iconMap.set('camp_site', 'camp_site');
   iconMap.set('picnic_site', 'picnic_site');
   iconMap.set('ruins', 'archaeological_site');
-  iconMap.set('yes', 'place_of_worship'); // generic worship
 
   // Inline SVG fallbacks for structural/geographic types
   const fallbacks = {
@@ -1065,10 +1064,17 @@ function typeIcon(type) {
   };
   if (!type) return pin;
   const t = type.toLowerCase();
+  const k = (osmKey || '').toLowerCase();
+  // 'yes' is ambiguous: building=yes → building, amenity:place_of_worship=yes → worship
+  if (t === 'yes') {
+    if (k === 'building') return bldg;
+    if (k === 'amenity') return img('place_of_worship');
+    return bldg; // default for generic 'yes'
+  }
   const mapped = iconMap.get(t);
   if (mapped) return img(mapped);
-  // 'yes' is a common catch-all in OSM (building=yes, etc.) — use building icon
-  if (t === 'yes') return bldg;
+  // Key-based fallbacks for building types
+  if (k === 'building') return bldg;
   return fallbacks[t] || pin;
 }
 
@@ -1375,7 +1381,7 @@ function renderSearchResults(results, container, onSelect) {
     const iconType = info.osm_value || info.type;
     const badge = info.category || info.type;
     return `<div class="search-item${i === highlightedIdx ? ' highlighted' : ''}" data-idx="${i}">
-      <div class="search-item-icon">${typeIcon(iconType)}</div>
+      <div class="search-item-icon">${typeIcon(iconType, info.osm_key)}</div>
       <div class="search-item-body">
         <div class="search-item-name">${esc(info.name)}</div>
         <div class="search-item-detail">${esc(info.detail)}</div>
@@ -1406,7 +1412,7 @@ function selectSearchResult(results, idx) {
 function popupHtml(info) {
   const coords = `${info.lat.toFixed(5)}, ${info.lng.toFixed(5)}`;
   const iconType = info.osm_value || info.type;
-  const icon = typeIcon(iconType);
+  const icon = typeIcon(iconType, info.osm_key);
   const catLine = info.category ? `<div class="popup-category">${esc(info.category)}</div>` : '';
   return `<div class="popup-header">
       <div class="popup-icon">${icon}</div>
@@ -1780,6 +1786,7 @@ async function snapReverseGeocode(clickLng, clickLat) {
     name: best.info.name,
     detail: best.info.detail,
     type: best.info.type,
+    osm_key: best.info.osm_key || '',
     osm_value: best.info.osm_value || '',
     category: best.info.category || '',
     roads,
@@ -1798,7 +1805,7 @@ function snapPopupHtml(snap) {
 
   // Icon: prefer specific OSM Carto icon, fallback to snap category icon
   const iconType = snap.osm_value || snap.type;
-  const specificIcon = typeIcon(iconType);
+  const specificIcon = typeIcon(iconType, snap.osm_key);
   const isGenericPin = specificIcon.includes('<circle cx="12" cy="10" r="3"/>');
   const icon = (!isGenericPin) ? specificIcon : snapCategoryIcon(snap.cat);
 
