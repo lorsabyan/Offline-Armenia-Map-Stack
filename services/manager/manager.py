@@ -914,11 +914,7 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     os.makedirs(TRIGGER_DIR, exist_ok=True)
-    # 0o777: shared volume between three different UIDs (manager, osrm, photon)
-    try:
-        os.chmod(TRIGGER_DIR, 0o777)
-    except OSError:
-        pass  # Non-root may not be able to chmod; volume inherits Docker defaults
+    # Volume permissions are set by entrypoint.sh (runs as root before dropping privileges)
     load_rate_limits()
     print(f"[manager] Listening on 0.0.0.0:{LISTEN_PORT}", flush=True)
     print(f"[manager] Trigger directory: {TRIGGER_DIR}", flush=True)
