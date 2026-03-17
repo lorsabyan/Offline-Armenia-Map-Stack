@@ -1853,17 +1853,22 @@ function snapPopupHtml(snap) {
 // Snap line SVG overlay
 let _snapSvg = null;
 let _snapLineCoords = null;
+let _snapRaf = 0;
 
 function _updateSnapSvg() {
-  if (!_snapSvg || !_snapLineCoords) return;
-  const canvas = map.getCanvas();
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  _snapSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  _snapSvg.style.width = w + 'px';
-  _snapSvg.style.height = h + 'px';
-  const line = _snapSvg.querySelector('polyline');
-  const pts = _snapLineCoords.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
-  line.setAttribute('points', pts);
+  if (_snapRaf) return;
+  _snapRaf = requestAnimationFrame(() => {
+    _snapRaf = 0;
+    if (!_snapSvg || !_snapLineCoords) return;
+    const canvas = map.getCanvas();
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    _snapSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    _snapSvg.style.width = w + 'px';
+    _snapSvg.style.height = h + 'px';
+    const line = _snapSvg.querySelector('polyline');
+    const pts = _snapLineCoords.map(c => { const p = map.project(c); return `${p.x},${p.y}`; }).join(' ');
+    line.setAttribute('points', pts);
+  });
 }
 
 // Clean up snap visualization

@@ -26,6 +26,7 @@ CRASH_COUNT=0
 MAX_CRASH_RESTARTS=5
 
 # Register trap early — before any side effects
+# Kill UPDATE_PID; tini (init: true) handles orphaned grandchildren (curl, osrm-extract)
 trap 'stop_server; [ -n "${UPDATE_PID:-}" ] && kill "$UPDATE_PID" 2>/dev/null; wait; exit 0' SIGINT SIGTERM
 
 mkdir -p "$OSRM_DATA_DIR" "$OSM_DOWNLOAD_DIR" "$TRIGGER_DIR"
@@ -196,9 +197,6 @@ stop_server() {
 
 schedule_updates() {
   (
-    # Forward SIGTERM to all children so curl/osrm-extract are cleaned up
-    trap 'kill 0; exit 0' SIGTERM SIGINT
-    write_status "idle" "Waiting for next update cycle"
 
     while true; do
       # Poll every POLL_INTERVAL seconds; break early on manual trigger

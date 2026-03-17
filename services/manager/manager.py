@@ -433,7 +433,12 @@ def _trigger_osrm_auto():
         print("[manager] nominatim-monitor: OSRM update already in progress, skipping", flush=True)
         inc_metric("updates_skipped_total", "osrm_auto_in_progress")
         return False
-    write_json_atomic(trigger_path, {"requested_at": now_iso(), "requested_by": "nominatim-monitor"})
+    try:
+        write_json_atomic(trigger_path, {"requested_at": now_iso(), "requested_by": "nominatim-monitor"})
+    except OSError as e:
+        print(f"[manager] nominatim-monitor: failed to write OSRM trigger: {e}", flush=True)
+        inc_metric("update_errors_total", "osrm")
+        return False
     inc_metric("updates_triggered_total", "osrm_auto")
     print("[manager] nominatim-monitor: OSRM update triggered", flush=True)
     return True
@@ -909,11 +914,11 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     os.makedirs(TRIGGER_DIR, exist_ok=True)
-    # 0o775: shared between manager and service group (not world-writable)
+    # 0o777: shared volume between three different UIDs (manager, osrm, photon)
     try:
-        os.chmod(TRIGGER_DIR, 0o775)
+        os.chmod(TRIGGER_DIR, 0o777)
     except OSError:
-        pass  # Non-root may not be able to chmod; volume permissions are set by Docker
+        pass  # Non-root may not be able to chmod; volume inherits Docker defaults
     load_rate_limits()
     print(f"[manager] Listening on 0.0.0.0:{LISTEN_PORT}", flush=True)
     print(f"[manager] Trigger directory: {TRIGGER_DIR}", flush=True)
