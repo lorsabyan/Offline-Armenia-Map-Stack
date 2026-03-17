@@ -15,7 +15,7 @@ A fully self-hosted, offline-capable mapping platform for Armenia built on Docke
 - [API Reference](#api-reference)
 - [Test App](#test-app)
 - [Autonomous Update Chain](#autonomous-update-chain)
-- [Operations](#operations)
+- [Status & CLI](#status--cli)
 - [Update Flow & Data Freshness](#update-flow--data-freshness)
 - [Zero-Downtime Design](#zero-downtime-design)
 - [Health Checks](#health-checks)
@@ -179,12 +179,13 @@ offline-armenia-map/
 └── services/
     ├── manager/
     │   ├── Dockerfile                # Python 3.13 Alpine (digest-pinned)
+    │   ├── entrypoint.sh             # Fix volume perms as root, then drop to non-root via su-exec
     │   └── manager.py                # Update orchestration + data-change monitor + Prometheus metrics
     ├── photon/
     │   ├── Dockerfile                # Java 21 JRE + Photon 1.0.1 (digest-pinned)
     │   └── entrypoint.sh             # Import, serve, trigger polling
     ├── osrm/
-    │   ├── Dockerfile                # OSRM v5.25.0 backend + curl (digest-pinned)
+    │   ├── Dockerfile                # OSRM v5.25.0 backend + curl + jq (digest-pinned)
     │   └── entrypoint.sh             # Download, prepare, shared-memory serve
     └── nginx/
         └── nginx.conf                # Reverse proxy + tile cache + blue-green upstream
@@ -485,7 +486,7 @@ The autonomous system has multiple safety layers:
 
 ---
 
-## Operations
+## Status & CLI
 
 ### Status Monitoring (Web UI)
 
@@ -740,7 +741,7 @@ All services include Docker health checks. Monitor with `docker compose ps`.
 | Service | Health Check | Interval | Start Period |
 |---------|-------------|----------|-------------|
 | tile-server | Render zoom-0 tile | 30s | 40 min |
-| nominatim | Search API query | 30s | 10 min |
+| nominatim | Status endpoint (`/status?format=json`) | 30s | 10 min |
 | photon-blue | Geocoding API query | 15s | 10 min |
 | photon-green | Geocoding API query | 15s | 10 min |
 | osrm | Nearest-point API | 15s | 5 min |
@@ -1188,7 +1189,7 @@ All backend services (tile-server, nominatim, photon, osrm, manager) are interna
 - No Docker socket is exposed to any container
 - Inter-service communication uses trigger files on a shared volume (mode `0777`, three UIDs)
 - Status files are written atomically (tmp + rename) to prevent partial reads
-- **CORS**: Wildcard `*` on read-only API endpoints only; mutation endpoint (`/update`) has no CORS headers
+- **CORS**: Wildcard `*` on public API endpoints (`/photon/`, `/osrm/`, `/tiles/`); `/manager/` location has no CORS headers (restricted to private networks)
 - **CSP**: Content-Security-Policy header on the test app restricts scripts, styles, and connections to self + OSM tile CDN
 - **nginx hardening**: `server_tokens off`, security headers on all locations, rate limiting (3 zones: api/tiles/manager), `/manager/` and `/metrics` restricted to RFC 1918 networks
 - Nominatim password defaults to a placeholder — **must be changed before first deploy**
