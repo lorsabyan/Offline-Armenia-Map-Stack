@@ -86,11 +86,18 @@ Services coordinate via files on a shared `update-triggers` volume (no Docker so
 
 ## Development Notes
 
-- All external Docker images are pinned by SHA256 digest for reproducibility
+- All external Docker images are pinned by SHA256 digest (including nginx); Photon JAR verified by SHA256
+- Dual Docker network: `map-internal` (no internet) + `map-egress` (for data downloads)
+- Manager, OSRM, and Photon run as non-root users; shared trigger volume is 0777 (3 UIDs)
+- Manager entrypoint runs as root to fix volume permissions, then drops to non-root via `su-exec`
+- nginx has rate limiting (3 zones), CSP headers, `server_tokens off`, security headers on all locations
+- `/manager/` and `/metrics` restricted to RFC 1918 networks in nginx
+- CORS only on read-only endpoints; mutation endpoint (`/update`) has no CORS
+- OSRM and Photon have crash counters with 60s stability windows and circuit breakers
 - Photon default language is Armenian (`hy`), country filter is `am`
 - The manager uses HMAC constant-time comparison for `UPDATE_TOKEN` auth
 - OSRM uses MLD algorithm by default; supports car/bike/foot profiles
-- nginx resolves container hostnames via Docker DNS (127.0.0.11)
 - Tile cache uses `stale-while-revalidate` for uninterrupted serving during updates
 - Rate limit state is persisted to the trigger volume (survives restarts, uses atomic temp+rename writes)
+- Route lines rendered via SVG overlay (not MapLibre GL layers) for reliable display over raster tiles
 - The test app stores map position/zoom in localStorage and has keyboard shortcuts (`/` search, `R` routing, `S` snap mode)

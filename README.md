@@ -75,11 +75,11 @@ graph TB
 
 | Service | Image / Build | Purpose | Port | Update Mechanism |
 |---------|--------------|---------|------|-----------------|
-| **tile-server** | `ghcr.io/overv/openstreetmap-tile-server` | Raster tile rendering (z/x/y PNG) | 8080 | Automatic minutely diffs from OSM |
+| **tile-server** | `ghcr.io/overv/openstreetmap-tile-server` | Raster tile rendering (z/x/y PNG) | — | Automatic minutely diffs from OSM |
 | **nominatim** | `mediagis/nominatim:4.5` | Geocoding database (PostgreSQL + address index) | — | Automatic Geofabrik replication |
 | **photon-blue** | `./services/photon` | Geocoding search API (instance 1 of 2) | — | Automatic (data-change monitor) + on-demand |
 | **photon-green** | `./services/photon` | Geocoding search API (instance 2 of 2) | — | Automatic (data-change monitor) + on-demand |
-| **osrm** | `./services/osrm` | Routing engine (driving directions) | 5002 | Automatic (data-change monitor) + on-demand |
+| **osrm** | `./services/osrm` | Routing engine (driving directions) | — | Automatic (data-change monitor) + on-demand |
 | **manager** | `./services/manager` | Update orchestration + data-change monitor | — | N/A (orchestrator) |
 | **nginx** | `nginx:1.27-alpine` | Reverse proxy, tile cache, CORS, load balancer | **80** | N/A (proxy) |
 
@@ -160,7 +160,7 @@ Copy `.env.example` to `.env` and adjust for your environment. The `.env` file i
 | `OSRM_PROFILE` | `car` | Routing profile (`car`, `bike`, `foot`) |
 | `OSRM_MAX_MATCHING_SIZE` | `100` | Max coordinates for map matching |
 | `OSRM_MAX_TABLE_SIZE` | `1000` | Max coordinates for distance matrix |
-| `NOMINATIM_PASSWORD` | `nominatim` | Nominatim PostgreSQL password |
+| `NOMINATIM_PASSWORD` | `CHANGE_ME_BEFORE_FIRST_DEPLOY` | Nominatim PostgreSQL password — **change before first deploy** |
 | `PHOTON_LANGUAGES` | `hy` | Languages for geocoding index |
 | `PHOTON_COUNTRY_CODES` | `am` | Countries to import |
 | `UPDATE_TOKEN` | *(empty)* | Bearer token for manager API authentication (recommended for production) |
@@ -501,7 +501,7 @@ The autonomous system has multiple safety layers:
 
 ### Web UI
 
-Click the refresh button (&#8635;) in the map controls to open the update panel. Each service shows its current state, last update time, and an "Update now" button. Progress is streamed in real-time via Server-Sent Events (SSE).
+Click the refresh button (&#8635;) in the map controls to open the **Service Status** panel. It shows real-time status for all services including last update timestamps, next scheduled check countdowns, Photon blue/green instance health, live health probes with latency, and the auto-update monitor state. The panel is read-only — all updates are autonomous. Data is streamed in real-time via Server-Sent Events (SSE).
 
 ### CLI
 
@@ -1122,7 +1122,7 @@ sudo ufw allow 443/tcp
 - [ ] HSTS header present on HTTPS responses
 - [ ] `/metrics` endpoint not accessible from the public internet
 - [ ] `/manager/` endpoint restricted to internal networks (if not using token auth)
-- [ ] Docker debug ports (`8080`, `5002`) bound to `127.0.0.1` (default)
+- [ ] Only nginx port 80 is exposed to the host (tile-server and OSRM are internal-only)
 - [ ] Firewall allows only ports 80 and 443
 - [ ] Zabbix/Prometheus monitoring configured and alerting
 - [ ] Log rotation configured (`docker compose` default: 50 MB × 5 files per service)
@@ -1195,16 +1195,19 @@ This happens when both the host nginx and the Docker nginx add `Access-Control-A
 
 ## Security Notes
 
-- All services run in an isolated Docker network
+- **Network isolation**: Dual Docker network — `map-internal` (no internet, inter-service only) and `map-egress` (outbound for tile-server, nominatim, osrm data downloads). Photon and manager have no outbound internet access.
+- **Non-root containers**: Manager, OSRM, and Photon run as non-root users
 - No Docker socket is exposed to any container
-- Inter-service communication uses trigger files on a shared volume (mode `0777`)
+- Inter-service communication uses trigger files on a shared volume (mode `0777`, three UIDs)
 - Status files are written atomically (tmp + rename) to prevent partial reads
-- CORS is permissive (`*`) — restrict in production behind a proper gateway
-- Nominatim password is configurable via `.env` — use a strong password in production
-- **API authentication**: Set `UPDATE_TOKEN` in `.env` to protect the update endpoint with Bearer token auth
+- **CORS**: Wildcard `*` on read-only API endpoints only; mutation endpoint (`/update`) has no CORS headers
+- **CSP**: Content-Security-Policy header on the test app restricts scripts, styles, and connections to self + OSM tile CDN
+- **nginx hardening**: `server_tokens off`, security headers on all locations, rate limiting (3 zones: api/tiles/manager), `/manager/` and `/metrics` restricted to RFC 1918 networks
+- Nominatim password defaults to a placeholder — **must be changed before first deploy**
+- **API authentication**: Set `UPDATE_TOKEN` in `.env` to protect the update endpoint with Bearer token auth (HMAC constant-time comparison)
 - **Rate limiting**: Update requests are throttled per service (configurable via `RATE_LIMIT_SECONDS`), with thread-safe serialization to prevent double-triggering via concurrent requests
-- **Input validation**: Manager API validates request body size, types, and service names
-- All base images are pinned to SHA256 digests (`image@sha256:...`) to prevent supply-chain attacks and ensure reproducible builds
+- **Input validation**: Manager API validates request body size, types, service names; source field sanitized to 64 alphanumeric chars; NOMINATIM_HOST validated against SSRF regex
+- **Prometheus labels**: Fixed allowlist of known paths prevents cardinality-based resource exhaustion; label values escaped for exposition format
+- All base images are pinned to SHA256 digests (`image@sha256:...`) including nginx; Photon JAR verified by SHA256 checksum
 - Rate limit state is persisted to the triggers volume and restored on manager restart
-- **Prometheus `/metrics`** endpoint is restricted to localhost and private RFC 1918 networks via nginx `allow`/`deny`
-- Metrics labels use a fixed allowlist of known paths to prevent cardinality-based resource exhaustion
+- **Crash resilience**: Both OSRM and Photon have crash counters with 60s stability windows and circuit breakers (5 max restarts before container exit for Docker-level restart backoff)
