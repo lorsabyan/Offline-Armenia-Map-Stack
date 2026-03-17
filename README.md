@@ -1184,7 +1184,7 @@ All backend services (tile-server, nominatim, photon, osrm, manager) are interna
 
 ## Security Notes
 
-- **Network isolation**: Dual Docker network — `map-internal` (no internet, inter-service only) and `map-egress` (outbound for tile-server, nominatim, osrm data downloads). Photon and manager have no outbound internet access.
+- **Network isolation**: Dual Docker network — `map-internal` (no internet, inter-service only) and `map-egress` (outbound for tile-server, nominatim, osrm, and nginx). Photon and manager have no outbound internet access.
 - **Non-root containers**: Manager, OSRM, and Photon run as non-root users
 - No Docker socket is exposed to any container
 - Inter-service communication uses trigger files on a shared volume (mode `0777`, three UIDs)
